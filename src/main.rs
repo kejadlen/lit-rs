@@ -45,45 +45,29 @@ fn parse_tangle_blocks(markdown_text: &str) -> Vec<TangleBlock> {
     blocks
 }
 
-/// Recursively extract tangle blocks from AST nodes
+/// Extract tangle blocks from top-level AST nodes only
 fn extract_tangle_blocks_from_node(node: &markdown::mdast::Node, blocks: &mut Vec<TangleBlock>) {
     use markdown::mdast::Node;
 
     match node {
-        Node::Code(code) => {
-            // Check if this is a tangle code block
-            if let Some(lang) = &code.lang {
-                if let Some(path_str) = lang.strip_prefix("tangle://") {
-                    blocks.push(TangleBlock {
-                        path: PathBuf::from(path_str),
-                        content: code.value.clone(),
-                    });
+        Node::Root(root) => {
+            // Only process direct children of the root
+            for child in &root.children {
+                if let Node::Code(code) = child {
+                    // Check if this is a tangle code block
+                    if let Some(lang) = &code.lang {
+                        if let Some(path_str) = lang.strip_prefix("tangle://") {
+                            blocks.push(TangleBlock {
+                                path: PathBuf::from(path_str),
+                                content: code.value.clone(),
+                            });
+                        }
+                    }
                 }
             }
         }
-        // Recursively process nodes that can contain children
-        Node::Root(root) => {
-            for child in &root.children {
-                extract_tangle_blocks_from_node(child, blocks);
-            }
-        }
-        Node::Blockquote(bq) => {
-            for child in &bq.children {
-                extract_tangle_blocks_from_node(child, blocks);
-            }
-        }
-        Node::List(list) => {
-            for child in &list.children {
-                extract_tangle_blocks_from_node(child, blocks);
-            }
-        }
-        Node::ListItem(item) => {
-            for child in &item.children {
-                extract_tangle_blocks_from_node(child, blocks);
-            }
-        }
         _ => {
-            // Other node types either don't have children or don't need processing
+            // Only process root nodes
         }
     }
 }
