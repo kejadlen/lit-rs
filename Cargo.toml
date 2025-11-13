@@ -1,5 +1,5 @@
 [package]
-name = "lit-rs"
+name = "lit"
 version = "0.1.0"
 edition = "2024"
 
