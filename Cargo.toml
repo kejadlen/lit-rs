@@ -1,0 +1,9 @@
+[package]
+name = "lit-rs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = "4.5.51"
+color-eyre = "0.6.5"
+tracing-subscriber = "0.3.20"
