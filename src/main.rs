@@ -1,5 +1,6 @@
 use clap::Parser;
 use color_eyre::Result;
+use markdown::{to_mdast, ParseOptions};
 use std::fs;
 use std::path::PathBuf;
 use walkdir::WalkDir;
@@ -29,41 +30,62 @@ fn parse_markdown_file(path: &PathBuf) -> Result<Vec<TangleBlock>> {
 }
 
 /// Parse markdown content and extract code blocks with tangle:// paths
-fn parse_tangle_blocks(markdown: &str) -> Vec<TangleBlock> {
+fn parse_tangle_blocks(markdown_text: &str) -> Vec<TangleBlock> {
     let mut blocks = Vec::new();
-    let mut in_code_block = false;
-    let mut current_path: Option<PathBuf> = None;
-    let mut current_content = String::new();
 
-    for line in markdown.lines() {
-        if line.starts_with("```") {
-            if in_code_block {
-                // End of code block
-                if let Some(path) = current_path.take() {
-                    blocks.push(TangleBlock {
-                        path,
-                        content: current_content.clone(),
-                    });
-                }
-                current_content.clear();
-                in_code_block = false;
-            } else {
-                // Start of code block
-                let lang = line.trim_start_matches('`').trim();
-                if let Some(path_str) = lang.strip_prefix("tangle://") {
-                    current_path = Some(PathBuf::from(path_str));
-                    in_code_block = true;
-                }
-            }
-        } else if in_code_block {
-            if !current_content.is_empty() {
-                current_content.push('\n');
-            }
-            current_content.push_str(line);
-        }
-    }
+    // Parse markdown to AST
+    let ast = match to_mdast(markdown_text, &ParseOptions::default()) {
+        Ok(ast) => ast,
+        Err(_) => return blocks,
+    };
+
+    // Walk the AST to find code blocks
+    extract_tangle_blocks_from_node(&ast, &mut blocks);
 
     blocks
+}
+
+/// Recursively extract tangle blocks from AST nodes
+fn extract_tangle_blocks_from_node(node: &markdown::mdast::Node, blocks: &mut Vec<TangleBlock>) {
+    use markdown::mdast::Node;
+
+    match node {
+        Node::Code(code) => {
+            // Check if this is a tangle code block
+            if let Some(lang) = &code.lang {
+                if let Some(path_str) = lang.strip_prefix("tangle://") {
+                    blocks.push(TangleBlock {
+                        path: PathBuf::from(path_str),
+                        content: code.value.clone(),
+                    });
+                }
+            }
+        }
+        // Recursively process nodes that can contain children
+        Node::Root(root) => {
+            for child in &root.children {
+                extract_tangle_blocks_from_node(child, blocks);
+            }
+        }
+        Node::Blockquote(bq) => {
+            for child in &bq.children {
+                extract_tangle_blocks_from_node(child, blocks);
+            }
+        }
+        Node::List(list) => {
+            for child in &list.children {
+                extract_tangle_blocks_from_node(child, blocks);
+            }
+        }
+        Node::ListItem(item) => {
+            for child in &item.children {
+                extract_tangle_blocks_from_node(child, blocks);
+            }
+        }
+        _ => {
+            // Other node types either don't have children or don't need processing
+        }
+    }
 }
 
 fn main() -> Result<()> {
