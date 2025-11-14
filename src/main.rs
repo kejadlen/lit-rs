@@ -217,24 +217,21 @@ impl Lit {
 
     /// Read all markdown files from input directory and parse tangle blocks
     fn read_blocks(&self) -> Result<Vec<TangledFile>> {
-        let files = WalkDir::new(&self.input)
+        let mut files = HashMap::<PathBuf, Vec<Block>>::new();
+
+        for entry in WalkDir::new(&self.input)
             .into_iter()
             .filter_map(|e| e.ok())
             .filter(|entry| entry.file_type().is_file())
             .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "md"))
-            .try_fold(
-                HashMap::<PathBuf, Vec<Block>>::new(),
-                |mut files, entry| -> Result<_> {
-                    let content = fs::read_to_string(entry.path())?;
-                    let blocks = Self::parse_markdown(&content)?;
+        {
+            let content = fs::read_to_string(entry.path())?;
+            let blocks = Self::parse_markdown(&content)?;
 
-                    for block in blocks {
-                        files.entry(block.path.clone()).or_default().push(block);
-                    }
-
-                    Ok(files)
-                },
-            )?;
+            for block in blocks {
+                files.entry(block.path.clone()).or_default().push(block);
+            }
+        }
 
         Ok(files
             .into_iter()
