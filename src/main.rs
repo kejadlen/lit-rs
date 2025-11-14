@@ -24,8 +24,6 @@ enum PositionError {
 /// Errors that can occur when parsing a block from a markdown node
 #[derive(Debug, Error)]
 enum BlockError {
-    #[error("Node is not a Code node")]
-    NotCodeNode,
     #[error("Not a tangle block")]
     NotTangleBlock,
     #[error("Tangle URL must be hostless (use tangle:///path, not tangle://path)")]
@@ -84,7 +82,7 @@ impl TryFrom<&Node> for Block {
 
     fn try_from(node: &Node) -> std::result::Result<Self, Self::Error> {
         let Node::Code(code) = node else {
-            return Err(BlockError::NotCodeNode);
+            return Err(BlockError::NotTangleBlock);
         };
 
         let lang = code.lang.as_ref().ok_or(BlockError::NotTangleBlock)?;
@@ -229,7 +227,7 @@ impl Lit {
                         let file_blocks = files.entry(block.path).or_default();
                         file_blocks.add(block.position, block.content)?;
                     }
-                    Err(BlockError::NotCodeNode | BlockError::NotTangleBlock) => {
+                    Err(BlockError::NotTangleBlock) => {
                         // Skip non-tangle code blocks silently
                     }
                     Err(e) => {
