@@ -1,132 +1,171 @@
 # Lit - A Literate Programming Tool
 
-This document describes the complete implementation of `lit`, a literate programming tool written in Rust. The tool extracts code from Markdown files and tangles them into source files, enabling a documentation-first development approach.
+`lit` extracts code from Markdown files and tangles them into source files. This literate programming tool, written in Rust, enables a documentation-first development approach.
 
 ## Architecture Overview
 
-The `lit` tool is built around several core concepts:
+Four core concepts drive `lit`:
 
-1. **Blocks**: Individual code snippets marked with `tangle:///` URLs
-2. **Positions**: A sorting mechanism to control block ordering using the `?at=` query parameter
-3. **Tangled Files**: Collections of blocks that belong to the same output file
-4. **The Lit Manager**: Orchestrates reading markdown files and writing tangled output
+1. **Blocks**: Code snippets marked with `tangle:///` URLs
+2. **Positions**: A sorting mechanism controlling block order via the `?at=` query parameter
+3. **Tangled Files**: Collections of blocks destined for the same output file
+4. **Lit Manager**: Orchestrates reading markdown and writing tangled output
 
-The implementation lives in `src/lib.rs` and follows a functional approach where blocks are parsed from markdown, grouped by destination file, sorted by position, and written to disk.
+The implementation in `src/lib.rs` follows a functional approach: parse blocks from markdown, group by destination, sort by position, write to disk.
 
-## Dependencies and Imports
+## Lit Manager
 
-We use several key dependencies:
-- `color_eyre` for error handling
-- `markdown` for parsing markdown AST
-- `url` for parsing `tangle://` URLs
-- `walkdir` for traversing input directories
-- `tracing` for logging
+`Lit` orchestrates the entire tangling process: read markdown from input directory, parse blocks, group by destination file, and write to output directory.
 
-````tangle:///src/lib.rs?at=a
-use color_eyre::{Result, eyre::bail};
-use markdown::{ParseOptions, mdast::Node, to_mdast};
-use std::collections::HashMap;
-use std::fs;
-use std::path::PathBuf;
-use thiserror::Error;
-use tracing::info;
-use url::Url;
-use walkdir::WalkDir;
-````
+### Core Structure
 
-## Error Types
-
-The system defines two specialized error types to provide clear feedback when things go wrong.
-
-### Position Errors
-
-Position keys must be non-empty and contain only lowercase letters. This ensures predictable lexicographic sorting and prevents issues with URL encoding or case sensitivity.
-
-````tangle:///src/lib.rs?at=b
-/// Errors that can occur when validating a position key
-#[derive(Debug, Error)]
-pub enum PositionError {
-    #[error("Position key must not be empty")]
-    Empty,
-    #[error("Position key '{0}' must contain only lowercase letters")]
-    InvalidCharacters(String),
+````tangle:///src/lib.rs?at=f
+/// Manages input and output directories for literate programming
+#[derive(Debug)]
+pub struct Lit {
+    /// Input directory path
+    pub input: PathBuf,
+    /// Output directory path
+    pub output: PathBuf,
 }
-````
 
-### Block Parsing Errors
-
-When parsing tangle blocks from markdown, several things can go wrong: the URL might be malformed, missing required components, or use an invalid format.
-
-````tangle:///src/lib.rs?at=c
-/// Errors that can occur when parsing a block from a markdown node
-#[derive(Debug, Error)]
-pub enum BlockError {
-    #[error("Not a tangle block")]
-    NotTangleBlock,
-    #[error("Tangle URL must be hostless (use tangle:///path, not tangle://path)")]
-    InvalidTangleUrl,
-    #[error("Tangle URL missing path")]
-    MissingPath,
-    #[error("Invalid tangle URL path")]
-    InvalidPath,
-    #[error(transparent)]
-    PositionError(#[from] PositionError),
-}
-````
-
-## Position System
-
-Blocks can be ordered using position keys specified via the `?at=` query parameter. For example, `tangle:///file.txt?at=a` comes before `tangle:///file.txt?at=z`. Blocks without an explicit position default to "m" (middle), allowing positioned blocks to be inserted before or after them.
-
-### Position Type
-
-The `Position` type is a validated wrapper around a string that ensures the position key meets our requirements.
-
-````tangle:///src/lib.rs?at=d
-/// Represents a validated position key for ordering blocks
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Position(String);
-
-impl Position {
-    /// Creates the implicit middle position "m" for unpositioned blocks.
-    pub fn middle() -> Self {
-        Position("m".to_string())
+impl Lit {
+    /// Create a new Lit instance with input and output directories
+    pub fn new(input: PathBuf, output: PathBuf) -> Self {
+        Lit { input, output }
     }
-}
+````
 
-impl TryFrom<String> for Position {
-    type Error = PositionError;
+### Parsing Markdown
 
-    fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
-        if value.is_empty() {
-            return Err(PositionError::Empty);
+`parse_markdown` converts markdown text into blocks. It builds an AST using the `markdown` crate, then extracts top-level code blocks only (ignoring nested blocks in quotes or lists).
+
+````tangle:///src/lib.rs?at=f
+    /// Parse markdown content and extract code blocks with tangle:// paths
+    pub fn parse_markdown(markdown_text: &str) -> Result<Vec<Block>> {
+        let ast = to_mdast(markdown_text, &ParseOptions::default())
+            .map_err(|e| color_eyre::eyre::eyre!("Failed to parse markdown: {}", e))?;
+
+        let Node::Root(root) = ast else {
+            bail!("Expected root node in markdown AST");
+        };
+
+        // Extract snippets from top-level code blocks only
+        root.children
+            .iter()
+            .map(Block::try_from)
+            .filter_map(|result| match result {
+                Ok(block) => Some(Ok(block)),
+                Err(BlockError::NotTangleBlock) => None,
+                Err(e) => Some(Err(e.into())),
+            })
+            .collect()
+    }
+````
+
+### Reading Input Files
+
+`read_blocks` walks the input directory, parses all `.md` files, and groups blocks by destination.
+
+````tangle:///src/lib.rs?at=f
+    /// Read all markdown files from input directory and parse tangle blocks
+    pub fn read_blocks(&self) -> Result<Vec<TangledFile>> {
+        let mut files = HashMap::<PathBuf, Vec<Block>>::new();
+
+        for entry in WalkDir::new(&self.input)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|entry| entry.file_type().is_file())
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "md"))
+        {
+            let content = fs::read_to_string(entry.path())?;
+            let blocks = Self::parse_markdown(&content)?;
+
+            for block in blocks {
+                files.entry(block.path.clone()).or_default().push(block);
+            }
         }
 
-        if !value.chars().all(|c| c.is_ascii_lowercase()) {
-            return Err(PositionError::InvalidCharacters(value));
-        }
-
-        Ok(Position(value))
+        Ok(files
+            .into_iter()
+            .map(|(path, blocks)| TangledFile { path, blocks })
+            .collect())
     }
-}
+````
 
-impl AsRef<str> for Position {
-    fn as_ref(&self) -> &str {
-        &self.0
+### Tangling
+
+`tangle` is the main entry point. It reads blocks, renders each file, creates directories, and writes output.
+
+````tangle:///src/lib.rs?at=f
+    /// Tangle the code blocks: read from input, parse, and write to output
+    pub fn tangle(&self) -> Result<()> {
+        let files = self.read_blocks()?;
+
+        // Process each file using try_for_each
+        files.into_iter().try_for_each(|mut file| -> Result<()> {
+            // Render the content
+            let content = file.render();
+
+            // Write to file
+            let full_path = self.output.join(&file.path);
+            if let Some(parent) = full_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            info!("Writing {}", full_path.display());
+            fs::write(&full_path, content)?;
+
+            Ok(())
+        })
     }
 }
 ````
 
-## Block Representation
+## Tangled Files
 
-A `Block` represents a single code snippet extracted from markdown. It contains:
-- The destination file path
-- A position for ordering (defaults to "m")
-- The actual code content
-
-Blocks are ordered solely by their position, which enables fine-grained control over the final output even when blocks are scattered across multiple markdown files.
+`TangledFile` groups blocks destined for the same output file. When rendering, it sorts blocks by position and concatenates them with double newlines.
 
 ````tangle:///src/lib.rs?at=e
+/// Represents a tangled file with all its blocks
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TangledFile {
+    /// The destination file path
+    pub path: PathBuf,
+    /// The blocks that belong to this file
+    pub blocks: Vec<Block>,
+}
+
+impl TangledFile {
+    /// Render the content by sorting blocks and concatenating them
+    pub fn render(&mut self) -> String {
+        // Sort blocks by position
+        self.blocks.sort();
+
+        // Concatenate content
+        let content = self
+            .blocks
+            .iter()
+            .map(|b| b.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        format!("{content}\n")
+    }
+}
+````
+
+## Blocks
+
+`Block` represents a single code snippet extracted from markdown:
+- Destination file path
+- Position for ordering (defaults to "m")
+- Code content
+
+Position alone determines block order, enabling fine-grained control over final output even when blocks scatter across multiple markdown files.
+
+### Block Structure
+
+````tangle:///src/lib.rs?at=d
 /// Represents a single tangle block from markdown
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block {
@@ -151,15 +190,15 @@ impl Ord for Block {
 }
 ````
 
-### Parsing Blocks from Markdown AST
+### Parsing from Markdown
 
-Converting a markdown AST node into a `Block` involves several validation steps:
-1. Ensure it's a code block with a language tag
-2. Parse the language tag as a `tangle:///` URL
-3. Validate the URL format (must be hostless)
-4. Extract the file path and optional position parameter
+Converting a markdown AST node into `Block` requires validation:
+1. Verify code block with language tag
+2. Parse language tag as `tangle:///` URL
+3. Validate URL format (must be hostless)
+4. Extract file path and optional position parameter
 
-````tangle:///src/lib.rs?at=f
+````tangle:///src/lib.rs?at=d
 impl TryFrom<&Node> for Block {
     type Error = BlockError;
 
@@ -211,157 +250,101 @@ impl TryFrom<&Node> for Block {
 }
 ````
 
-## Tangled File Abstraction
+## Position System
 
-A `TangledFile` groups all blocks destined for the same output file. When rendering, it sorts blocks by position and concatenates them with double newlines as separators.
+Position keys specified via `?at=` control block order. For example, `tangle:///file.txt?at=a` precedes `tangle:///file.txt?at=z`. Blocks without explicit positions default to "m" (middle), allowing positioned blocks before or after.
 
-````tangle:///src/lib.rs?at=g
-/// Represents a tangled file with all its blocks
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TangledFile {
-    /// The destination file path
-    pub path: PathBuf,
-    /// The blocks that belong to this file
-    pub blocks: Vec<Block>,
-}
+### Position Type
 
-impl TangledFile {
-    /// Render the content by sorting blocks and concatenating them
-    pub fn render(&mut self) -> String {
-        // Sort blocks by position
-        self.blocks.sort();
+`Position` wraps a validated string that meets our requirements.
 
-        // Concatenate content
-        let content = self
-            .blocks
-            .iter()
-            .map(|b| b.content.as_str())
-            .collect::<Vec<_>>()
-            .join("\n\n");
+````tangle:///src/lib.rs?at=c
+/// Represents a validated position key for ordering blocks
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Position(String);
 
-        format!("{content}\n")
+impl Position {
+    /// Creates the implicit middle position "m" for unpositioned blocks.
+    pub fn middle() -> Self {
+        Position("m".to_string())
     }
 }
-````
 
-## The Lit Manager
+impl TryFrom<String> for Position {
+    type Error = PositionError;
 
-The `Lit` struct ties everything together. It manages input and output directories, provides methods for parsing markdown, and orchestrates the tangling process.
-
-### Core Structure
-
-````tangle:///src/lib.rs?at=h
-/// Manages input and output directories for literate programming
-#[derive(Debug)]
-pub struct Lit {
-    /// Input directory path
-    pub input: PathBuf,
-    /// Output directory path
-    pub output: PathBuf,
-}
-
-impl Lit {
-    /// Create a new Lit instance with input and output directories
-    pub fn new(input: PathBuf, output: PathBuf) -> Self {
-        Lit { input, output }
-    }
-````
-
-### Parsing Markdown
-
-The `parse_markdown` method converts markdown text into a list of blocks. It uses the `markdown` crate to build an AST, then extracts only top-level code blocks (ignoring nested blocks in quotes or lists).
-
-````tangle:///src/lib.rs?at=i
-    /// Parse markdown content and extract code blocks with tangle:// paths
-    pub fn parse_markdown(markdown_text: &str) -> Result<Vec<Block>> {
-        let ast = to_mdast(markdown_text, &ParseOptions::default())
-            .map_err(|e| color_eyre::eyre::eyre!("Failed to parse markdown: {}", e))?;
-
-        let Node::Root(root) = ast else {
-            bail!("Expected root node in markdown AST");
-        };
-
-        // Extract snippets from top-level code blocks only
-        root.children
-            .iter()
-            .map(Block::try_from)
-            .filter_map(|result| match result {
-                Ok(block) => Some(Ok(block)),
-                Err(BlockError::NotTangleBlock) => None,
-                Err(e) => Some(Err(e.into())),
-            })
-            .collect()
-    }
-````
-
-### Reading All Input Files
-
-The `read_blocks` method walks the input directory, parses all `.md` files, and groups blocks by their destination path.
-
-````tangle:///src/lib.rs?at=j
-    /// Read all markdown files from input directory and parse tangle blocks
-    pub fn read_blocks(&self) -> Result<Vec<TangledFile>> {
-        let mut files = HashMap::<PathBuf, Vec<Block>>::new();
-
-        for entry in WalkDir::new(&self.input)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|entry| entry.file_type().is_file())
-            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "md"))
-        {
-            let content = fs::read_to_string(entry.path())?;
-            let blocks = Self::parse_markdown(&content)?;
-
-            for block in blocks {
-                files.entry(block.path.clone()).or_default().push(block);
-            }
+    fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
+        if value.is_empty() {
+            return Err(PositionError::Empty);
         }
 
-        Ok(files
-            .into_iter()
-            .map(|(path, blocks)| TangledFile { path, blocks })
-            .collect())
+        if !value.chars().all(|c| c.is_ascii_lowercase()) {
+            return Err(PositionError::InvalidCharacters(value));
+        }
+
+        Ok(Position(value))
     }
+}
+
+impl AsRef<str> for Position {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
 ````
 
-### Tangling Everything Together
+## Error Types
 
-The `tangle` method is the main entry point. It reads all blocks, renders each file, creates necessary directories, and writes the output.
+Two specialized error types provide clear feedback when operations fail.
 
-````tangle:///src/lib.rs?at=k
-    /// Tangle the code blocks: read from input, parse, and write to output
-    pub fn tangle(&self) -> Result<()> {
-        let files = self.read_blocks()?;
+### Position Errors
 
-        // Process each file using try_for_each
-        files.into_iter().try_for_each(|mut file| -> Result<()> {
-            // Render the content
-            let content = file.render();
+Position keys must be non-empty and contain only lowercase letters. This ensures predictable lexicographic sorting and prevents URL encoding or case sensitivity issues.
 
-            // Write to file
-            let full_path = self.output.join(&file.path);
-            if let Some(parent) = full_path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            info!("Writing {}", full_path.display());
-            fs::write(&full_path, content)?;
+````tangle:///src/lib.rs?at=b
+/// Errors that can occur when validating a position key
+#[derive(Debug, Error)]
+pub enum PositionError {
+    #[error("Position key must not be empty")]
+    Empty,
+    #[error("Position key '{0}' must contain only lowercase letters")]
+    InvalidCharacters(String),
+}
+````
 
-            Ok(())
-        })
-    }
+### Block Parsing Errors
+
+Parsing tangle blocks from markdown can fail in several ways: malformed URLs, missing required components, or invalid formats.
+
+````tangle:///src/lib.rs?at=b
+/// Errors that can occur when parsing a block from a markdown node
+#[derive(Debug, Error)]
+pub enum BlockError {
+    #[error("Not a tangle block")]
+    NotTangleBlock,
+    #[error("Tangle URL must be hostless (use tangle:///path, not tangle://path)")]
+    InvalidTangleUrl,
+    #[error("Tangle URL missing path")]
+    MissingPath,
+    #[error("Invalid tangle URL path")]
+    InvalidPath,
+    #[error(transparent)]
+    PositionError(#[from] PositionError),
 }
 ````
 
 ## Tests
 
-The test suite validates all aspects of the implementation: parsing, positioning, sorting, and end-to-end tangling. These tests serve both as verification and as examples of how the tool should behave.
+Tests validate parsing, positioning, sorting, and end-to-end tangling. They serve as both verification and examples.
 
-````tangle:///src/lib.rs?at=z
+```tangle:///src/lib.rs?at=yz
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+```
 
+````tangle:///src/lib.rs?at=z
     #[test]
     fn test_parse_single_tangle_block() {
         let markdown = r#"# Test
@@ -979,5 +962,9 @@ Line 1
 
         Ok(())
     }
-}
 ````
+
+```tangle:///src/lib.rs?at=zz
+}
+```
+
