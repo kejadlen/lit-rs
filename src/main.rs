@@ -19,35 +19,38 @@ struct FileBlocks {
 }
 
 impl FileBlocks {
-    /// Add a positioned block, returning an error if the position key is not unique
-    /// or if it contains non-lowercase characters
-    fn add_positioned(&mut self, at: String, content: String) -> Result<()> {
-        // Validate that position key is not empty
-        ensure!(!at.is_empty(), "Position key must not be empty");
+    /// Add a block with an optional position key.
+    /// If at is Some, validates and adds to positioned blocks.
+    /// If at is None, adds to unpositioned blocks.
+    fn add(&mut self, at: Option<String>, content: String) -> Result<()> {
+        match at {
+            Some(at) => {
+                // Validate that position key is not empty
+                ensure!(!at.is_empty(), "Position key must not be empty");
 
-        // Validate that position key only contains lowercase letters
-        ensure!(
-            at.chars().all(|c| c.is_ascii_lowercase()),
-            "Position key '{at}' must contain only lowercase letters"
-        );
+                // Validate that position key only contains lowercase letters
+                ensure!(
+                    at.chars().all(|c| c.is_ascii_lowercase()),
+                    "Position key '{at}' must contain only lowercase letters"
+                );
 
-        // Disallow position keys starting with 'm'
-        ensure!(
-            !at.starts_with('m'),
-            "Position key '{at}' must not start with 'm'"
-        );
+                // Disallow position keys starting with 'm'
+                ensure!(
+                    !at.starts_with('m'),
+                    "Position key '{at}' must not start with 'm'"
+                );
 
-        ensure!(
-            !self.positioned.iter().any(|(p, _)| p == &at),
-            "Duplicate position key '{at}' for the same file"
-        );
-        self.positioned.push((at, content));
+                ensure!(
+                    !self.positioned.iter().any(|(p, _)| p == &at),
+                    "Duplicate position key '{at}' for the same file"
+                );
+                self.positioned.push((at, content));
+            }
+            None => {
+                self.unpositioned.push(content);
+            }
+        }
         Ok(())
-    }
-
-    /// Add an unpositioned block
-    fn add_unpositioned(&mut self, content: String) {
-        self.unpositioned.push(content);
     }
 
     /// Get the concatenated content with blocks sorted lexicographically by position key.
@@ -166,12 +169,7 @@ impl Lit {
                     && let Some((path, at)) = Self::parse_tangle_url(lang)
                 {
                     let file_blocks = files.entry(path).or_default();
-
-                    if let Some(at_key) = at {
-                        file_blocks.add_positioned(at_key, code.value.clone())?;
-                    } else {
-                        file_blocks.add_unpositioned(code.value.clone());
-                    }
+                    file_blocks.add(at, code.value.clone())?;
                 }
             }
         }
@@ -198,12 +196,12 @@ impl Lit {
 
                     // Add positioned blocks
                     for (at, content) in file_blocks.positioned {
-                        target.add_positioned(at, content)?;
+                        target.add(Some(at), content)?;
                     }
 
                     // Add unpositioned blocks
                     for content in file_blocks.unpositioned {
-                        target.add_unpositioned(content);
+                        target.add(None, content)?;
                     }
                 }
                 Ok(())
