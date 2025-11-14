@@ -26,11 +26,9 @@ enum PositionError {
 enum BlockError {
     #[error("Node is not a Code node")]
     NotCodeNode,
-    #[error("Code block has no language specified")]
-    NoLanguage,
-    #[error("Not a tangle URL")]
-    NotTangleUrl,
-    #[error("URL must be a hostless tangle URL (tangle:///path)")]
+    #[error("Not a tangle block")]
+    NotTangleBlock,
+    #[error("Tangle URL must be hostless (use tangle:///path, not tangle://path)")]
     InvalidTangleUrl,
     #[error("Tangle URL missing path")]
     MissingPath,
@@ -88,16 +86,21 @@ impl TryFrom<&Node> for Block {
         };
 
         let Some(lang) = &code.lang else {
-            return Err(BlockError::NoLanguage);
+            return Err(BlockError::NotTangleBlock);
         };
 
         // Parse the tangle:/// URL (hostless format)
         let Ok(parsed) = Url::parse(lang) else {
-            return Err(BlockError::NotTangleUrl);
+            return Err(BlockError::NotTangleBlock);
         };
 
-        // Verify it's a hostless tangle:/// URL
-        if parsed.scheme() != "tangle" || parsed.host_str().is_some() {
+        // Check if it's a tangle URL
+        if parsed.scheme() != "tangle" {
+            return Err(BlockError::NotTangleBlock);
+        }
+
+        // Ensure it's hostless (tangle:///path, not tangle://path)
+        if parsed.host_str().is_some() {
             return Err(BlockError::InvalidTangleUrl);
         }
 
@@ -231,6 +234,14 @@ impl Lit {
                     Err(BlockError::PositionError(e)) => {
                         // Propagate position errors for tangle blocks
                         bail!(e);
+                    }
+                    Err(BlockError::InvalidTangleUrl) => {
+                        // Propagate invalid tangle URL errors (user tried tangle:// instead of tangle:///)
+                        bail!(BlockError::InvalidTangleUrl);
+                    }
+                    Err(BlockError::MissingPath) => {
+                        // Propagate missing path errors for tangle blocks
+                        bail!(BlockError::MissingPath);
                     }
                     Err(_) => {
                         // Skip non-tangle code blocks silently
@@ -715,6 +726,22 @@ Duplicate
 
         let result = Block::try_from(&code);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_block_with_host_rejected() {
+        let markdown = r#"```tangle://path/to/file.txt
+test content
+```"#;
+
+        let result = Lit::parse_markdown(markdown);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must be hostless")
+        );
     }
 
     #[test]
