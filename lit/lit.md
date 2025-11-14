@@ -497,6 +497,27 @@ impl TryFrom<&Node> for Block {
 }
 ````
 
+### Block Parsing Errors
+
+Parsing tangle blocks from markdown can fail in several ways: malformed URLs, missing required components, or invalid formats.
+
+````tangle:///src/lib.rs?at=d
+/// Errors that can occur when parsing a block from a markdown node
+#[derive(Debug, Error)]
+pub enum BlockError {
+    #[error("Not a tangle block")]
+    NotTangleBlock,
+    #[error("Tangle URL must be hostless (use tangle:///path, not tangle://path)")]
+    InvalidTangleUrl,
+    #[error("Tangle URL missing path")]
+    MissingPath,
+    #[error("Invalid tangle URL path")]
+    InvalidPath,
+    #[error(transparent)]
+    PositionError(#[from] PositionError),
+}
+````
+
 ### Tests
 
 Tests verify Block parsing, validation, and sorting behavior.
@@ -758,6 +779,21 @@ impl AsRef<str> for Position {
 }
 ````
 
+### Position Errors
+
+Position keys must be non-empty and contain only lowercase letters. This ensures predictable lexicographic sorting and prevents URL encoding or case sensitivity issues.
+
+````tangle:///src/lib.rs?at=c
+/// Errors that can occur when validating a position key
+#[derive(Debug, Error)]
+pub enum PositionError {
+    #[error("Position key must not be empty")]
+    Empty,
+    #[error("Position key '{0}' must contain only lowercase letters")]
+    InvalidCharacters(String),
+}
+````
+
 ### Tests
 
 Tests verify Position validation rules.
@@ -929,45 +965,7 @@ Content
     }
 ````
 
-## Error Types
-
-Two specialized error types provide clear feedback when operations fail.
-
-### Position Errors
-
-Position keys must be non-empty and contain only lowercase letters. This ensures predictable lexicographic sorting and prevents URL encoding or case sensitivity issues.
-
-````tangle:///src/lib.rs?at=b
-/// Errors that can occur when validating a position key
-#[derive(Debug, Error)]
-pub enum PositionError {
-    #[error("Position key must not be empty")]
-    Empty,
-    #[error("Position key '{0}' must contain only lowercase letters")]
-    InvalidCharacters(String),
-}
-````
-
-### Block Parsing Errors
-
-Parsing tangle blocks from markdown can fail in several ways: malformed URLs, missing required components, or invalid formats.
-
-````tangle:///src/lib.rs?at=b
-/// Errors that can occur when parsing a block from a markdown node
-#[derive(Debug, Error)]
-pub enum BlockError {
-    #[error("Not a tangle block")]
-    NotTangleBlock,
-    #[error("Tangle URL must be hostless (use tangle:///path, not tangle://path)")]
-    InvalidTangleUrl,
-    #[error("Tangle URL missing path")]
-    MissingPath,
-    #[error("Invalid tangle URL path")]
-    InvalidPath,
-    #[error(transparent)]
-    PositionError(#[from] PositionError),
-}
-````
+## Test Setup
 
 ```tangle:///src/lib.rs?at=yz
 #[cfg(test)]

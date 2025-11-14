@@ -8,30 +8,6 @@ use tracing::info;
 use url::Url;
 use walkdir::WalkDir;
 
-/// Errors that can occur when validating a position key
-#[derive(Debug, Error)]
-pub enum PositionError {
-    #[error("Position key must not be empty")]
-    Empty,
-    #[error("Position key '{0}' must contain only lowercase letters")]
-    InvalidCharacters(String),
-}
-
-/// Errors that can occur when parsing a block from a markdown node
-#[derive(Debug, Error)]
-pub enum BlockError {
-    #[error("Not a tangle block")]
-    NotTangleBlock,
-    #[error("Tangle URL must be hostless (use tangle:///path, not tangle://path)")]
-    InvalidTangleUrl,
-    #[error("Tangle URL missing path")]
-    MissingPath,
-    #[error("Invalid tangle URL path")]
-    InvalidPath,
-    #[error(transparent)]
-    PositionError(#[from] PositionError),
-}
-
 /// Represents a validated position key for ordering blocks
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Position(String);
@@ -63,6 +39,15 @@ impl AsRef<str> for Position {
     fn as_ref(&self) -> &str {
         &self.0
     }
+}
+
+/// Errors that can occur when validating a position key
+#[derive(Debug, Error)]
+pub enum PositionError {
+    #[error("Position key must not be empty")]
+    Empty,
+    #[error("Position key '{0}' must contain only lowercase letters")]
+    InvalidCharacters(String),
 }
 
 /// Represents a single tangle block from markdown
@@ -136,6 +121,21 @@ impl TryFrom<&Node> for Block {
             content: code.value.clone(),
         })
     }
+}
+
+/// Errors that can occur when parsing a block from a markdown node
+#[derive(Debug, Error)]
+pub enum BlockError {
+    #[error("Not a tangle block")]
+    NotTangleBlock,
+    #[error("Tangle URL must be hostless (use tangle:///path, not tangle://path)")]
+    InvalidTangleUrl,
+    #[error("Tangle URL missing path")]
+    MissingPath,
+    #[error("Invalid tangle URL path")]
+    InvalidPath,
+    #[error(transparent)]
+    PositionError(#[from] PositionError),
 }
 
 /// Represents a tangled file with all its blocks
