@@ -149,6 +149,23 @@ struct TangledFile {
     blocks: Vec<Block>,
 }
 
+impl TangledFile {
+    /// Render the content by sorting blocks and concatenating them
+    fn render(&mut self) -> String {
+        // Sort blocks by position
+        self.blocks.sort();
+
+        // Concatenate content
+        let content = self.blocks
+            .iter()
+            .map(|b| b.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        format!("{content}\n")
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "lit")]
 #[command(about = "A literate programming tool", long_about = None)]
@@ -233,16 +250,8 @@ impl Lit {
         files
             .into_iter()
             .try_for_each(|mut file| -> Result<()> {
-                // Sort blocks by position
-                file.blocks.sort();
-
-                // Concatenate content
-                let content = file.blocks
-                    .iter()
-                    .map(|b| b.content.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n\n");
-                let content = format!("{content}\n");
+                // Render the content
+                let content = file.render();
 
                 // Write to file
                 let full_path = self.output.join(&file.path);
