@@ -17,19 +17,47 @@ struct Args {
 
 /// Manages tangle blocks grouped by file path
 #[derive(Debug)]
-struct SnippetsManager {
+struct Loom {
     /// Map from file path to list of content snippets for that file
     files: HashMap<PathBuf, Vec<String>>,
 }
 
-impl SnippetsManager {
-    /// Create an iterator over all snippets with borrowed content
-    fn iter(&self) -> impl Iterator<Item = Snippet<'_>> + '_ {
+impl Loom {
+    /// Parse markdown content and extract code blocks with tangle:// paths
+    fn from_markdown(markdown_text: &str) -> Self {
+        use markdown::mdast::Node;
+
+        // Parse markdown to AST
+        let ast = match to_mdast(markdown_text, &ParseOptions::default()) {
+            Ok(ast) => ast,
+            Err(_) => return Loom { files: HashMap::new() },
+        };
+
+        let mut files: HashMap<PathBuf, Vec<String>> = HashMap::new();
+
+        // Extract snippets from top-level code blocks only
+        if let Node::Root(root) = ast {
+            for child in &root.children {
+                if let Node::Code(code) = child {
+                    if let Some(lang) = &code.lang {
+                        if let Some(path_str) = lang.strip_prefix("tangle://") {
+                            files
+                                .entry(PathBuf::from(path_str))
+                                .or_insert_with(Vec::new)
+                                .push(code.value.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        Loom { files }
+    }
+
+    /// Create an iterator over all snippets as (path, content) tuples
+    fn iter(&self) -> impl Iterator<Item = (&PathBuf, &str)> + '_ {
         self.files.iter().flat_map(|(path, contents)| {
-            contents.iter().map(move |content| Snippet {
-                path,
-                content: content.as_str(),
-            })
+            contents.iter().map(move |content| (path, content.as_str()))
         })
     }
 
@@ -44,50 +72,10 @@ impl SnippetsManager {
     }
 }
 
-/// Represents a borrowed view of a Block
-#[derive(Debug, Clone, PartialEq)]
-struct Snippet<'a> {
-    /// The file path where this code should be written
-    path: &'a PathBuf,
-    /// The code content (borrowed)
-    content: &'a str,
-}
-
 /// Parse a markdown file and extract all tangle code blocks
-fn parse_markdown_file(path: &PathBuf) -> Result<SnippetsManager> {
+fn parse_markdown_file(path: &PathBuf) -> Result<Loom> {
     let content = fs::read_to_string(path)?;
-    Ok(parse_tangle_blocks(&content))
-}
-
-/// Parse markdown content and extract code blocks with tangle:// paths
-fn parse_tangle_blocks(markdown_text: &str) -> SnippetsManager {
-    use markdown::mdast::Node;
-
-    // Parse markdown to AST
-    let ast = match to_mdast(markdown_text, &ParseOptions::default()) {
-        Ok(ast) => ast,
-        Err(_) => return SnippetsManager { files: HashMap::new() },
-    };
-
-    let mut files: HashMap<PathBuf, Vec<String>> = HashMap::new();
-
-    // Extract snippets from top-level code blocks only
-    if let Node::Root(root) = ast {
-        for child in &root.children {
-            if let Node::Code(code) = child {
-                if let Some(lang) = &code.lang {
-                    if let Some(path_str) = lang.strip_prefix("tangle://") {
-                        files
-                            .entry(PathBuf::from(path_str))
-                            .or_insert_with(Vec::new)
-                            .push(code.value.clone());
-                    }
-                }
-            }
-        }
-    }
-
-    SnippetsManager { files }
+    Ok(Loom::from_markdown(&content))
 }
 
 fn main() -> Result<()> {
@@ -109,14 +97,14 @@ fn main() -> Result<()> {
                     println!("File: {}", path.display());
 
                     match parse_markdown_file(&path) {
-                        Ok(manager) => {
-                            if manager.is_empty() {
+                        Ok(loom) => {
+                            if loom.is_empty() {
                                 println!("  No tangle blocks found");
                             } else {
-                                println!("  Found {} tangle block(s):", manager.len());
-                                for snippet in manager.iter() {
-                                    println!("    → {}", snippet.path.display());
-                                    println!("      {} lines", snippet.content.lines().count());
+                                println!("  Found {} tangle block(s):", loom.len());
+                                for (path, content) in loom.iter() {
+                                    println!("    → {}", path.display());
+                                    println!("      {} lines", content.lines().count());
                                 }
                             }
                         }
@@ -148,12 +136,12 @@ fn main() {
 ```
 "#;
 
-        let manager = parse_tangle_blocks(markdown);
-        assert_eq!(manager.len(), 1);
+        let loom = Loom::from_markdown(markdown);
+        assert_eq!(loom.len(), 1);
 
-        let snippets: Vec<_> = manager.iter().collect();
-        assert_eq!(snippets[0].path, &PathBuf::from("src/main.rs"));
-        assert_eq!(snippets[0].content, "fn main() {\n    println!(\"Hello\");\n}");
+        let snippets: Vec<_> = loom.iter().collect();
+        assert_eq!(snippets[0].0, &PathBuf::from("src/main.rs"));
+        assert_eq!(snippets[0].1, "fn main() {\n    println!(\"Hello\");\n}");
     }
 
     #[test]
@@ -171,13 +159,13 @@ code 2
 ```
 "#;
 
-        let manager = parse_tangle_blocks(markdown);
-        assert_eq!(manager.len(), 2);
+        let loom = Loom::from_markdown(markdown);
+        assert_eq!(loom.len(), 2);
 
-        let snippets: Vec<_> = manager.iter().collect();
+        let snippets: Vec<_> = loom.iter().collect();
         // HashMap doesn't guarantee order, so check both snippets exist
-        assert!(snippets.iter().any(|s| s.path == &PathBuf::from("file1.rs") && s.content == "code 1"));
-        assert!(snippets.iter().any(|s| s.path == &PathBuf::from("file2.rs") && s.content == "code 2"));
+        assert!(snippets.iter().any(|(path, content)| path == &&PathBuf::from("file1.rs") && *content == "code 1"));
+        assert!(snippets.iter().any(|(path, content)| path == &&PathBuf::from("file2.rs") && *content == "code 2"));
     }
 
     #[test]
@@ -195,12 +183,12 @@ let y = 10;
 ```
 "#;
 
-        let manager = parse_tangle_blocks(markdown);
-        assert_eq!(manager.len(), 1);
+        let loom = Loom::from_markdown(markdown);
+        assert_eq!(loom.len(), 1);
 
-        let snippets: Vec<_> = manager.iter().collect();
-        assert_eq!(snippets[0].path, &PathBuf::from("output.rs"));
-        assert_eq!(snippets[0].content, "// This should be extracted\nlet y = 10;");
+        let snippets: Vec<_> = loom.iter().collect();
+        assert_eq!(snippets[0].0, &PathBuf::from("output.rs"));
+        assert_eq!(snippets[0].1, "// This should be extracted\nlet y = 10;");
     }
 
     #[test]
@@ -218,12 +206,12 @@ Top level content
 > ```
 "#;
 
-        let manager = parse_tangle_blocks(markdown);
-        assert_eq!(manager.len(), 1);
+        let loom = Loom::from_markdown(markdown);
+        assert_eq!(loom.len(), 1);
 
-        let snippets: Vec<_> = manager.iter().collect();
-        assert_eq!(snippets[0].path, &PathBuf::from("top-level.txt"));
-        assert_eq!(snippets[0].content, "Top level content");
+        let snippets: Vec<_> = loom.iter().collect();
+        assert_eq!(snippets[0].0, &PathBuf::from("top-level.txt"));
+        assert_eq!(snippets[0].1, "Top level content");
     }
 
     #[test]
@@ -242,19 +230,19 @@ Top level content
   ```
 "#;
 
-        let manager = parse_tangle_blocks(markdown);
-        assert_eq!(manager.len(), 1);
+        let loom = Loom::from_markdown(markdown);
+        assert_eq!(loom.len(), 1);
 
-        let snippets: Vec<_> = manager.iter().collect();
-        assert_eq!(snippets[0].path, &PathBuf::from("top-level.txt"));
-        assert_eq!(snippets[0].content, "Top level content");
+        let snippets: Vec<_> = loom.iter().collect();
+        assert_eq!(snippets[0].0, &PathBuf::from("top-level.txt"));
+        assert_eq!(snippets[0].1, "Top level content");
     }
 
     #[test]
     fn test_empty_markdown() {
         let markdown = "";
-        let manager = parse_tangle_blocks(markdown);
-        assert_eq!(manager.len(), 0);
+        let loom = Loom::from_markdown(markdown);
+        assert_eq!(loom.len(), 0);
     }
 
     #[test]
@@ -270,8 +258,8 @@ Regular code block
 More text.
 "#;
 
-        let manager = parse_tangle_blocks(markdown);
-        assert_eq!(manager.len(), 0);
+        let loom = Loom::from_markdown(markdown);
+        assert_eq!(loom.len(), 0);
     }
 
     #[test]
@@ -280,12 +268,12 @@ More text.
 pub fn helper() {}
 ```"#;
 
-        let manager = parse_tangle_blocks(markdown);
-        assert_eq!(manager.len(), 1);
+        let loom = Loom::from_markdown(markdown);
+        assert_eq!(loom.len(), 1);
 
-        let snippets: Vec<_> = manager.iter().collect();
-        assert_eq!(snippets[0].path, &PathBuf::from("src/modules/utils.rs"));
-        assert_eq!(snippets[0].content, "pub fn helper() {}");
+        let snippets: Vec<_> = loom.iter().collect();
+        assert_eq!(snippets[0].0, &PathBuf::from("src/modules/utils.rs"));
+        assert_eq!(snippets[0].1, "pub fn helper() {}");
     }
 
     #[test]
@@ -293,11 +281,11 @@ pub fn helper() {}
         let markdown = r#"```tangle://empty.txt
 ```"#;
 
-        let manager = parse_tangle_blocks(markdown);
-        assert_eq!(manager.len(), 1);
+        let loom = Loom::from_markdown(markdown);
+        assert_eq!(loom.len(), 1);
 
-        let snippets: Vec<_> = manager.iter().collect();
-        assert_eq!(snippets[0].path, &PathBuf::from("empty.txt"));
-        assert_eq!(snippets[0].content, "");
+        let snippets: Vec<_> = loom.iter().collect();
+        assert_eq!(snippets[0].0, &PathBuf::from("empty.txt"));
+        assert_eq!(snippets[0].1, "");
     }
 }
