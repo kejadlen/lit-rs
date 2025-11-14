@@ -17,12 +17,14 @@ struct Args {
 
 /// Manages tangle blocks grouped by file path
 #[derive(Debug)]
-struct Loom {
+struct Lit {
+    /// Input directory path (if applicable)
+    input: Option<PathBuf>,
     /// Map from file path to list of content snippets for that file
-    files: HashMap<PathBuf, Vec<String>>,
+    output: HashMap<PathBuf, Vec<String>>,
 }
 
-impl Loom {
+impl Lit {
     /// Parse markdown content and extract code blocks with tangle:// paths
     fn from_markdown(markdown_text: &str) -> Self {
         use markdown::mdast::Node;
@@ -30,7 +32,7 @@ impl Loom {
         // Parse markdown to AST
         let ast = match to_mdast(markdown_text, &ParseOptions::default()) {
             Ok(ast) => ast,
-            Err(_) => return Loom { files: HashMap::new() },
+            Err(_) => return Lit { input: None, output: HashMap::new() },
         };
 
         let mut files: HashMap<PathBuf, Vec<String>> = HashMap::new();
@@ -55,7 +57,7 @@ impl Loom {
                 });
         }
 
-        Loom { files }
+        Lit { input: None, output: files }
     }
 
     /// Walk a directory and parse all markdown files, collecting tangle blocks
@@ -72,33 +74,33 @@ impl Loom {
             })
             .try_for_each(|entry| -> Result<()> {
                 let content = fs::read_to_string(entry.path())?;
-                let loom = Loom::from_markdown(&content);
+                let lit = Lit::from_markdown(&content);
 
-                // Merge the parsed loom into our files HashMap
-                for (path, contents) in loom.files {
+                // Merge the parsed lit into our files HashMap
+                for (path, contents) in lit.output {
                     files.entry(path).or_insert_with(Vec::new).extend(contents);
                 }
                 Ok(())
             })?;
 
-        Ok(Loom { files })
+        Ok(Lit { input: Some(directory.clone()), output: files })
     }
 
     /// Create an iterator over all snippets as (path, content) tuples
     fn iter(&self) -> impl Iterator<Item = (&PathBuf, &str)> + '_ {
-        self.files.iter().flat_map(|(path, contents)| {
+        self.output.iter().flat_map(|(path, contents)| {
             contents.iter().map(move |content| (path, content.as_str()))
         })
     }
 
     /// Get the total number of snippets across all files
     fn len(&self) -> usize {
-        self.files.values().map(|v| v.len()).sum()
+        self.output.values().map(|v| v.len()).sum()
     }
 
     /// Check if there are no snippets
     fn is_empty(&self) -> bool {
-        self.files.is_empty()
+        self.output.is_empty()
     }
 }
 
@@ -110,13 +112,13 @@ fn main() -> Result<()> {
 
     println!("Processing markdown files in {}:\n", args.directory.display());
 
-    let loom = Loom::from_directory(&args.directory)?;
+    let lit = Lit::from_directory(&args.directory)?;
 
-    if loom.is_empty() {
+    if lit.is_empty() {
         println!("No tangle blocks found");
     } else {
-        println!("Found {} tangle block(s) across all files:\n", loom.len());
-        for (path, content) in loom.iter() {
+        println!("Found {} tangle block(s) across all files:\n", lit.len());
+        for (path, content) in lit.iter() {
             println!("  → {}", path.display());
             println!("    {} lines", content.lines().count());
         }
@@ -140,10 +142,10 @@ fn main() {
 ```
 "#;
 
-        let loom = Loom::from_markdown(markdown);
-        assert_eq!(loom.len(), 1);
+        let lit = Lit::from_markdown(markdown);
+        assert_eq!(lit.len(), 1);
 
-        let snippets: Vec<_> = loom.iter().collect();
+        let snippets: Vec<_> = lit.iter().collect();
         assert_eq!(snippets[0].0, &PathBuf::from("src/main.rs"));
         assert_eq!(snippets[0].1, "fn main() {\n    println!(\"Hello\");\n}");
     }
@@ -163,10 +165,10 @@ code 2
 ```
 "#;
 
-        let loom = Loom::from_markdown(markdown);
-        assert_eq!(loom.len(), 2);
+        let lit = Lit::from_markdown(markdown);
+        assert_eq!(lit.len(), 2);
 
-        let snippets: Vec<_> = loom.iter().collect();
+        let snippets: Vec<_> = lit.iter().collect();
         // HashMap doesn't guarantee order, so check both snippets exist
         assert!(snippets.iter().any(|(path, content)| path == &&PathBuf::from("file1.rs") && *content == "code 1"));
         assert!(snippets.iter().any(|(path, content)| path == &&PathBuf::from("file2.rs") && *content == "code 2"));
@@ -187,10 +189,10 @@ let y = 10;
 ```
 "#;
 
-        let loom = Loom::from_markdown(markdown);
-        assert_eq!(loom.len(), 1);
+        let lit = Lit::from_markdown(markdown);
+        assert_eq!(lit.len(), 1);
 
-        let snippets: Vec<_> = loom.iter().collect();
+        let snippets: Vec<_> = lit.iter().collect();
         assert_eq!(snippets[0].0, &PathBuf::from("output.rs"));
         assert_eq!(snippets[0].1, "// This should be extracted\nlet y = 10;");
     }
@@ -210,10 +212,10 @@ Top level content
 > ```
 "#;
 
-        let loom = Loom::from_markdown(markdown);
-        assert_eq!(loom.len(), 1);
+        let lit = Lit::from_markdown(markdown);
+        assert_eq!(lit.len(), 1);
 
-        let snippets: Vec<_> = loom.iter().collect();
+        let snippets: Vec<_> = lit.iter().collect();
         assert_eq!(snippets[0].0, &PathBuf::from("top-level.txt"));
         assert_eq!(snippets[0].1, "Top level content");
     }
@@ -234,10 +236,10 @@ Top level content
   ```
 "#;
 
-        let loom = Loom::from_markdown(markdown);
-        assert_eq!(loom.len(), 1);
+        let lit = Lit::from_markdown(markdown);
+        assert_eq!(lit.len(), 1);
 
-        let snippets: Vec<_> = loom.iter().collect();
+        let snippets: Vec<_> = lit.iter().collect();
         assert_eq!(snippets[0].0, &PathBuf::from("top-level.txt"));
         assert_eq!(snippets[0].1, "Top level content");
     }
@@ -245,8 +247,8 @@ Top level content
     #[test]
     fn test_empty_markdown() {
         let markdown = "";
-        let loom = Loom::from_markdown(markdown);
-        assert_eq!(loom.len(), 0);
+        let lit = Lit::from_markdown(markdown);
+        assert_eq!(lit.len(), 0);
     }
 
     #[test]
@@ -262,8 +264,8 @@ Regular code block
 More text.
 "#;
 
-        let loom = Loom::from_markdown(markdown);
-        assert_eq!(loom.len(), 0);
+        let lit = Lit::from_markdown(markdown);
+        assert_eq!(lit.len(), 0);
     }
 
     #[test]
@@ -272,10 +274,10 @@ More text.
 pub fn helper() {}
 ```"#;
 
-        let loom = Loom::from_markdown(markdown);
-        assert_eq!(loom.len(), 1);
+        let lit = Lit::from_markdown(markdown);
+        assert_eq!(lit.len(), 1);
 
-        let snippets: Vec<_> = loom.iter().collect();
+        let snippets: Vec<_> = lit.iter().collect();
         assert_eq!(snippets[0].0, &PathBuf::from("src/modules/utils.rs"));
         assert_eq!(snippets[0].1, "pub fn helper() {}");
     }
@@ -285,10 +287,10 @@ pub fn helper() {}
         let markdown = r#"```tangle://empty.txt
 ```"#;
 
-        let loom = Loom::from_markdown(markdown);
-        assert_eq!(loom.len(), 1);
+        let lit = Lit::from_markdown(markdown);
+        assert_eq!(lit.len(), 1);
 
-        let snippets: Vec<_> = loom.iter().collect();
+        let snippets: Vec<_> = lit.iter().collect();
         assert_eq!(snippets[0].0, &PathBuf::from("empty.txt"));
         assert_eq!(snippets[0].1, "");
     }
