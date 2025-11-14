@@ -9,6 +9,7 @@ color-eyre = "*"
 markdown = "*"
 tracing = "*"
 tracing-subscriber = { version = "*", features = ["env-filter"] }
+url = "*"
 walkdir = "*"
 
 [dev-dependencies]
