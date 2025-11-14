@@ -32,8 +32,8 @@ enum BlockError {
     InvalidTangleUrl,
     #[error("Tangle URL missing path")]
     MissingPath,
-    #[error("Tangle URL path must not start with //")]
-    PathStartsWithDoubleSlash,
+    #[error("Invalid tangle URL path")]
+    InvalidPath,
     #[error(transparent)]
     PositionError(#[from] PositionError),
 }
@@ -108,7 +108,7 @@ impl TryFrom<&Node> for Block {
             return Err(BlockError::MissingPath);
         }
         if path.starts_with("//") {
-            return Err(BlockError::PathStartsWithDoubleSlash);
+            return Err(BlockError::InvalidPath);
         }
         let path_str = path.trim_start_matches('/').to_string();
 
@@ -241,9 +241,9 @@ impl Lit {
                         // Propagate missing path errors for tangle blocks
                         bail!(BlockError::MissingPath);
                     }
-                    Err(BlockError::PathStartsWithDoubleSlash) => {
-                        // Propagate double slash path errors for tangle blocks
-                        bail!(BlockError::PathStartsWithDoubleSlash);
+                    Err(BlockError::InvalidPath) => {
+                        // Propagate invalid path errors for tangle blocks
+                        bail!(BlockError::InvalidPath);
                     }
                     Err(_) => {
                         // Skip non-tangle code blocks silently
@@ -758,7 +758,7 @@ test content
             result
                 .unwrap_err()
                 .to_string()
-                .contains("must not start with //")
+                .contains("Invalid tangle URL path")
         );
     }
 
