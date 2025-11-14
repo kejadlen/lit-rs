@@ -15,13 +15,13 @@ struct Args {
     directory: PathBuf,
 }
 
-/// Manages tangle blocks grouped by file path
+/// Manages input and output directories for literate programming
 #[derive(Debug)]
 struct Lit {
-    /// Input directory path (if applicable)
-    input: Option<PathBuf>,
-    /// Map from file path to list of content snippets for that file
-    output: HashMap<PathBuf, Vec<String>>,
+    /// Input directory path
+    input: PathBuf,
+    /// Output directory path
+    output: PathBuf,
 }
 
 /// Represents tangled files ready to be written to disk
@@ -61,14 +61,19 @@ impl TangledFiles {
 }
 
 impl Lit {
+    /// Create a new Lit instance with input and output directories
+    fn new(input: PathBuf, output: PathBuf) -> Self {
+        Lit { input, output }
+    }
+
     /// Parse markdown content and extract code blocks with tangle:// paths
-    fn from_markdown(markdown_text: &str) -> Self {
+    fn parse_markdown(markdown_text: &str) -> HashMap<PathBuf, Vec<String>> {
         use markdown::mdast::Node;
 
         // Parse markdown to AST
         let ast = match to_mdast(markdown_text, &ParseOptions::default()) {
             Ok(ast) => ast,
-            Err(_) => return Lit { input: None, output: HashMap::new() },
+            Err(_) => return HashMap::new(),
         };
 
         let mut files: HashMap<PathBuf, Vec<String>> = HashMap::new();
@@ -93,14 +98,14 @@ impl Lit {
                 });
         }
 
-        Lit { input: None, output: files }
+        files
     }
 
-    /// Walk a directory and parse all markdown files, collecting tangle blocks
-    fn from_directory(directory: &PathBuf) -> Result<Self> {
+    /// Read all markdown files from input directory and parse tangle blocks
+    fn read_blocks(&self) -> Result<HashMap<PathBuf, Vec<String>>> {
         let mut files: HashMap<PathBuf, Vec<String>> = HashMap::new();
 
-        WalkDir::new(directory)
+        WalkDir::new(&self.input)
             .into_iter()
             .filter_map(|e| e.ok())
             .filter(|entry| entry.file_type().is_file())
@@ -110,38 +115,21 @@ impl Lit {
             })
             .try_for_each(|entry| -> Result<()> {
                 let content = fs::read_to_string(entry.path())?;
-                let lit = Lit::from_markdown(&content);
+                let blocks = Self::parse_markdown(&content);
 
-                // Merge the parsed lit into our files HashMap
-                for (path, contents) in lit.output {
+                // Merge the parsed blocks into our files HashMap
+                for (path, contents) in blocks {
                     files.entry(path).or_insert_with(Vec::new).extend(contents);
                 }
                 Ok(())
             })?;
 
-        Ok(Lit { input: Some(directory.clone()), output: files })
-    }
-
-    /// Create an iterator over all snippets as (path, content) tuples
-    fn iter(&self) -> impl Iterator<Item = (&PathBuf, &str)> + '_ {
-        self.output.iter().flat_map(|(path, contents)| {
-            contents.iter().map(move |content| (path, content.as_str()))
-        })
-    }
-
-    /// Get the total number of snippets across all files
-    fn len(&self) -> usize {
-        self.output.values().map(|v| v.len()).sum()
-    }
-
-    /// Check if there are no snippets
-    fn is_empty(&self) -> bool {
-        self.output.is_empty()
+        Ok(files)
     }
 
     /// Create TangledFiles by concatenating all snippets for each file
-    fn to_tangled_files(&self) -> TangledFiles {
-        let files = self.output
+    fn to_tangled_files(blocks: HashMap<PathBuf, Vec<String>>) -> TangledFiles {
+        let files = blocks
             .iter()
             .map(|(path, snippets)| {
                 let content = snippets.join("\n");
@@ -152,10 +140,11 @@ impl Lit {
         TangledFiles { files }
     }
 
-    /// Tangle the code blocks and write them to the output directory
-    fn tangle(&self, output_dir: &PathBuf) -> Result<()> {
-        let tangled = self.to_tangled_files();
-        tangled.write_all(output_dir)?;
+    /// Tangle the code blocks: read from input, parse, and write to output
+    fn tangle(&self) -> Result<()> {
+        let blocks = self.read_blocks()?;
+        let tangled = Self::to_tangled_files(blocks);
+        tangled.write_all(&self.output)?;
         Ok(())
     }
 }
@@ -166,19 +155,16 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    println!("Processing markdown files in {}:\n", args.directory.display());
+    // For now, use a default output directory (could be made configurable)
+    let output_dir = args.directory.join("output");
 
-    let lit = Lit::from_directory(&args.directory)?;
+    println!("Reading markdown files from: {}", args.directory.display());
+    println!("Writing tangled files to: {}\n", output_dir.display());
 
-    if lit.is_empty() {
-        println!("No tangle blocks found");
-    } else {
-        println!("Found {} tangle block(s) across all files:\n", lit.len());
-        for (path, content) in lit.iter() {
-            println!("  → {}", path.display());
-            println!("    {} lines", content.lines().count());
-        }
-    }
+    let lit = Lit::new(args.directory, output_dir);
+    lit.tangle()?;
+
+    println!("Tangling complete!");
 
     Ok(())
 }
@@ -188,7 +174,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_single_tangle_block() {
+    fn test_parse_single_tangle_block() {
         let markdown = r#"# Test
 
 ```tangle://src/main.rs
@@ -198,16 +184,13 @@ fn main() {
 ```
 "#;
 
-        let lit = Lit::from_markdown(markdown);
-        assert_eq!(lit.len(), 1);
-
-        let snippets: Vec<_> = lit.iter().collect();
-        assert_eq!(snippets[0].0, &PathBuf::from("src/main.rs"));
-        assert_eq!(snippets[0].1, "fn main() {\n    println!(\"Hello\");\n}");
+        let blocks = Lit::parse_markdown(markdown);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks.get(&PathBuf::from("src/main.rs")).unwrap()[0], "fn main() {\n    println!(\"Hello\");\n}");
     }
 
     #[test]
-    fn test_multiple_tangle_blocks() {
+    fn test_parse_multiple_tangle_blocks() {
         let markdown = r#"# Multiple Blocks
 
 ```tangle://file1.rs
@@ -221,17 +204,16 @@ code 2
 ```
 "#;
 
-        let lit = Lit::from_markdown(markdown);
-        assert_eq!(lit.len(), 2);
-
-        let snippets: Vec<_> = lit.iter().collect();
-        // HashMap doesn't guarantee order, so check both snippets exist
-        assert!(snippets.iter().any(|(path, content)| path == &&PathBuf::from("file1.rs") && *content == "code 1"));
-        assert!(snippets.iter().any(|(path, content)| path == &&PathBuf::from("file2.rs") && *content == "code 2"));
+        let blocks = Lit::parse_markdown(markdown);
+        assert_eq!(blocks.len(), 2);
+        assert!(blocks.contains_key(&PathBuf::from("file1.rs")));
+        assert!(blocks.contains_key(&PathBuf::from("file2.rs")));
+        assert_eq!(blocks.get(&PathBuf::from("file1.rs")).unwrap()[0], "code 1");
+        assert_eq!(blocks.get(&PathBuf::from("file2.rs")).unwrap()[0], "code 2");
     }
 
     #[test]
-    fn test_ignore_regular_code_blocks() {
+    fn test_parse_ignore_regular_code_blocks() {
         let markdown = r#"# Test
 
 ```rust
@@ -245,16 +227,13 @@ let y = 10;
 ```
 "#;
 
-        let lit = Lit::from_markdown(markdown);
-        assert_eq!(lit.len(), 1);
-
-        let snippets: Vec<_> = lit.iter().collect();
-        assert_eq!(snippets[0].0, &PathBuf::from("output.rs"));
-        assert_eq!(snippets[0].1, "// This should be extracted\nlet y = 10;");
+        let blocks = Lit::parse_markdown(markdown);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks.get(&PathBuf::from("output.rs")).unwrap()[0], "// This should be extracted\nlet y = 10;");
     }
 
     #[test]
-    fn test_ignore_nested_in_blockquote() {
+    fn test_parse_ignore_nested_in_blockquote() {
         let markdown = r#"# Test
 
 ```tangle://top-level.txt
@@ -268,16 +247,13 @@ Top level content
 > ```
 "#;
 
-        let lit = Lit::from_markdown(markdown);
-        assert_eq!(lit.len(), 1);
-
-        let snippets: Vec<_> = lit.iter().collect();
-        assert_eq!(snippets[0].0, &PathBuf::from("top-level.txt"));
-        assert_eq!(snippets[0].1, "Top level content");
+        let blocks = Lit::parse_markdown(markdown);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks.get(&PathBuf::from("top-level.txt")).unwrap()[0], "Top level content");
     }
 
     #[test]
-    fn test_ignore_nested_in_list() {
+    fn test_parse_ignore_nested_in_list() {
         let markdown = r#"# Test
 
 ```tangle://top-level.txt
@@ -292,23 +268,20 @@ Top level content
   ```
 "#;
 
-        let lit = Lit::from_markdown(markdown);
-        assert_eq!(lit.len(), 1);
-
-        let snippets: Vec<_> = lit.iter().collect();
-        assert_eq!(snippets[0].0, &PathBuf::from("top-level.txt"));
-        assert_eq!(snippets[0].1, "Top level content");
+        let blocks = Lit::parse_markdown(markdown);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks.get(&PathBuf::from("top-level.txt")).unwrap()[0], "Top level content");
     }
 
     #[test]
-    fn test_empty_markdown() {
+    fn test_parse_empty_markdown() {
         let markdown = "";
-        let lit = Lit::from_markdown(markdown);
-        assert_eq!(lit.len(), 0);
+        let blocks = Lit::parse_markdown(markdown);
+        assert_eq!(blocks.len(), 0);
     }
 
     #[test]
-    fn test_no_tangle_blocks() {
+    fn test_parse_no_tangle_blocks() {
         let markdown = r#"# Just a regular document
 
 Some text here.
@@ -320,72 +293,49 @@ Regular code block
 More text.
 "#;
 
-        let lit = Lit::from_markdown(markdown);
-        assert_eq!(lit.len(), 0);
+        let blocks = Lit::parse_markdown(markdown);
+        assert_eq!(blocks.len(), 0);
     }
 
     #[test]
-    fn test_tangle_with_subdirectory_path() {
+    fn test_parse_subdirectory_path() {
         let markdown = r#"```tangle://src/modules/utils.rs
 pub fn helper() {}
 ```"#;
 
-        let lit = Lit::from_markdown(markdown);
-        assert_eq!(lit.len(), 1);
-
-        let snippets: Vec<_> = lit.iter().collect();
-        assert_eq!(snippets[0].0, &PathBuf::from("src/modules/utils.rs"));
-        assert_eq!(snippets[0].1, "pub fn helper() {}");
+        let blocks = Lit::parse_markdown(markdown);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks.get(&PathBuf::from("src/modules/utils.rs")).unwrap()[0], "pub fn helper() {}");
     }
 
     #[test]
-    fn test_empty_tangle_block() {
+    fn test_parse_empty_tangle_block() {
         let markdown = r#"```tangle://empty.txt
 ```"#;
 
-        let lit = Lit::from_markdown(markdown);
-        assert_eq!(lit.len(), 1);
-
-        let snippets: Vec<_> = lit.iter().collect();
-        assert_eq!(snippets[0].0, &PathBuf::from("empty.txt"));
-        assert_eq!(snippets[0].1, "");
+        let blocks = Lit::parse_markdown(markdown);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks.get(&PathBuf::from("empty.txt")).unwrap()[0], "");
     }
 
     #[test]
-    fn test_tangled_files_from_lit() {
-        let markdown = r#"# Test
+    fn test_to_tangled_files_concatenates_snippets() {
+        let mut blocks = HashMap::new();
+        blocks.insert(PathBuf::from("output.txt"), vec!["Line 1".to_string(), "Line 2".to_string()]);
 
-```tangle://output.txt
-Line 1
-```
-
-```tangle://output.txt
-Line 2
-```
-"#;
-
-        let lit = Lit::from_markdown(markdown);
-        let tangled = lit.to_tangled_files();
+        let tangled = Lit::to_tangled_files(blocks);
 
         assert_eq!(tangled.len(), 1);
         assert_eq!(tangled.files.get(&PathBuf::from("output.txt")), Some(&"Line 1\nLine 2".to_string()));
     }
 
     #[test]
-    fn test_tangled_files_multiple_files() {
-        let markdown = r#"# Test
+    fn test_to_tangled_files_multiple_files() {
+        let mut blocks = HashMap::new();
+        blocks.insert(PathBuf::from("file1.txt"), vec!["Content 1".to_string()]);
+        blocks.insert(PathBuf::from("file2.txt"), vec!["Content 2".to_string()]);
 
-```tangle://file1.txt
-Content 1
-```
-
-```tangle://file2.txt
-Content 2
-```
-"#;
-
-        let lit = Lit::from_markdown(markdown);
-        let tangled = lit.to_tangled_files();
+        let tangled = Lit::to_tangled_files(blocks);
 
         assert_eq!(tangled.len(), 2);
         assert_eq!(tangled.files.get(&PathBuf::from("file1.txt")), Some(&"Content 1".to_string()));
@@ -393,9 +343,23 @@ Content 2
     }
 
     #[test]
-    fn test_tangle_writes_files() -> Result<()> {
+    fn test_tangle_end_to_end() -> Result<()> {
         use std::env;
 
+        // Create a temporary input directory with markdown files
+        let temp_input = env::temp_dir().join("lit-test-input");
+        let temp_output = env::temp_dir().join("lit-test-output");
+
+        // Clean up if they exist
+        if temp_input.exists() {
+            fs::remove_dir_all(&temp_input)?;
+        }
+        if temp_output.exists() {
+            fs::remove_dir_all(&temp_output)?;
+        }
+
+        // Create input directory and markdown file
+        fs::create_dir_all(&temp_input)?;
         let markdown = r#"# Test
 
 ```tangle://test.txt
@@ -406,31 +370,26 @@ Hello World
 Nested file
 ```
 "#;
+        fs::write(temp_input.join("test.md"), markdown)?;
 
-        let lit = Lit::from_markdown(markdown);
-
-        // Create a temporary directory for testing
-        let temp_dir = env::temp_dir().join("lit-test-tangle");
-        if temp_dir.exists() {
-            fs::remove_dir_all(&temp_dir)?;
-        }
-
-        // Tangle the files
-        lit.tangle(&temp_dir)?;
+        // Create Lit and tangle
+        let lit = Lit::new(temp_input.clone(), temp_output.clone());
+        lit.tangle()?;
 
         // Verify the files were created
-        assert!(temp_dir.join("test.txt").exists());
-        assert!(temp_dir.join("subdir/test2.txt").exists());
+        assert!(temp_output.join("test.txt").exists());
+        assert!(temp_output.join("subdir/test2.txt").exists());
 
         // Verify the content
-        let content1 = fs::read_to_string(temp_dir.join("test.txt"))?;
+        let content1 = fs::read_to_string(temp_output.join("test.txt"))?;
         assert_eq!(content1, "Hello World");
 
-        let content2 = fs::read_to_string(temp_dir.join("subdir/test2.txt"))?;
+        let content2 = fs::read_to_string(temp_output.join("subdir/test2.txt"))?;
         assert_eq!(content2, "Nested file");
 
         // Clean up
-        fs::remove_dir_all(&temp_dir)?;
+        fs::remove_dir_all(&temp_input)?;
+        fs::remove_dir_all(&temp_output)?;
 
         Ok(())
     }
