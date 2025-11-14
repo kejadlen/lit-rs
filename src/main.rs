@@ -68,7 +68,7 @@ impl AsRef<str> for Position {
 }
 
 /// Represents a single tangle block from markdown
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Block {
     /// The file path to write this block to
     path: PathBuf,
@@ -76,6 +76,18 @@ struct Block {
     position: Position,
     /// The content of the code block
     content: String,
+}
+
+impl PartialOrd for Block {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Block {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.position.cmp(&other.position)
+    }
 }
 
 impl TryFrom<&Node> for Block {
@@ -218,7 +230,7 @@ impl Lit {
             .into_iter()
             .try_for_each(|(path, mut blocks)| -> Result<()> {
                 // Sort blocks by position
-                blocks.sort_by(|a, b| a.position.cmp(&b.position));
+                blocks.sort();
 
                 // Concatenate content
                 let content = blocks
@@ -519,7 +531,7 @@ Second
 ```"#;
 
         let mut blocks = Lit::parse_markdown(markdown).unwrap();
-        blocks.sort_by(|a, b| a.position.cmp(&b.position));
+        blocks.sort();
         let content = blocks
             .iter()
             .map(|b| b.content.as_str())
@@ -548,7 +560,7 @@ Unpositioned 2
 ```"#;
 
         let mut blocks = Lit::parse_markdown(markdown).unwrap();
-        blocks.sort_by(|a, b| a.position.cmp(&b.position));
+        blocks.sort();
         let content = blocks
             .iter()
             .map(|b| b.content.as_str())
@@ -581,7 +593,7 @@ Duplicate
 
         // Sort and concatenate like tangle does
         let mut blocks = blocks;
-        blocks.sort_by(|a, b| a.position.cmp(&b.position));
+        blocks.sort();
         let content = blocks
             .iter()
             .map(|b| b.content.as_str())
@@ -805,7 +817,7 @@ Third
 
         let mut blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 3);
-        blocks.sort_by(|a, b| a.position.cmp(&b.position));
+        blocks.sort();
         let content = blocks
             .iter()
             .map(|b| b.content.as_str())
