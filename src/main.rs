@@ -140,6 +140,15 @@ impl TryFrom<&Node> for Block {
     }
 }
 
+/// Represents a tangled file with all its blocks
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TangledFile {
+    /// The destination file path
+    path: PathBuf,
+    /// The blocks that belong to this file
+    blocks: Vec<Block>,
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "lit")]
 #[command(about = "A literate programming tool", long_about = None)]
@@ -190,8 +199,8 @@ impl Lit {
     }
 
     /// Read all markdown files from input directory and parse tangle blocks
-    fn read_blocks(&self) -> Result<HashMap<PathBuf, Vec<Block>>> {
-        WalkDir::new(&self.input)
+    fn read_blocks(&self) -> Result<Vec<TangledFile>> {
+        let files = WalkDir::new(&self.input)
             .into_iter()
             .filter_map(|e| e.ok())
             .filter(|entry| entry.file_type().is_file())
@@ -208,7 +217,12 @@ impl Lit {
 
                     Ok(files)
                 },
-            )
+            )?;
+
+        Ok(files
+            .into_iter()
+            .map(|(path, blocks)| TangledFile { path, blocks })
+            .collect())
     }
 
     /// Tangle the code blocks: read from input, parse, and write to output
@@ -218,12 +232,12 @@ impl Lit {
         // Process each file using try_for_each
         files
             .into_iter()
-            .try_for_each(|(path, mut blocks)| -> Result<()> {
+            .try_for_each(|mut file| -> Result<()> {
                 // Sort blocks by position
-                blocks.sort();
+                file.blocks.sort();
 
                 // Concatenate content
-                let content = blocks
+                let content = file.blocks
                     .iter()
                     .map(|b| b.content.as_str())
                     .collect::<Vec<_>>()
@@ -231,7 +245,7 @@ impl Lit {
                 let content = format!("{content}\n");
 
                 // Write to file
-                let full_path = self.output.join(path);
+                let full_path = self.output.join(&file.path);
                 if let Some(parent) = full_path.parent() {
                     fs::create_dir_all(parent)?;
                 }
