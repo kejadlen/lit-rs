@@ -61,3 +61,40 @@ chmod +x hello.sh
 - Regular code blocks (like the bash example above) are ignored
 - Multiple tangle blocks for the same file are collected together
 - Only top-level code blocks are extracted (nested blocks in lists or quotes are ignored)
+
+## Block Positioning
+
+You can optionally specify the position of blocks using the `at` parameter. This is useful when you want to control the order of code blocks across different sections of documentation.
+
+Blocks are sorted lexicographically by their position key. Blocks without a position are implicitly placed at position "m", allowing you to place blocks before or after them.
+
+### Example: Building a Program Structure
+
+Here's how to build a program with headers, main content, and footer in the correct order:
+
+```tangle://program.txt?at=a
+# Header Section
+# This appears first
+```
+
+```tangle://program.txt?at=z
+# Footer Section
+# This appears last
+```
+
+```tangle://program.txt
+# Main Content
+# This appears in the middle (implicitly at position "m")
+```
+
+The resulting `program.txt` will be ordered as:
+1. Header (at=a, which comes before "m")
+2. Main Content (no position, defaults to "m")
+3. Footer (at=z, which comes after "m")
+
+### Position Key Rules
+
+- Position keys must contain only alphabetic letters (a-z, A-Z)
+- Position keys cannot start with 'm' or 'M' (reserved for unpositioned blocks)
+- Position keys must be unique within the same file
+- Sorting is lexicographic (case-sensitive): "A" < "B" < "a" < "b"

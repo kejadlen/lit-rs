@@ -1,10 +1,80 @@
 use clap::Parser;
-use color_eyre::Result;
+use color_eyre::{eyre::eyre, Result};
 use markdown::{to_mdast, ParseOptions};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use walkdir::WalkDir;
+
+/// Represents blocks for a single file, with positioned and unpositioned blocks separated
+#[derive(Debug, Default)]
+struct FileBlocks {
+    /// Blocks with an explicit position (position_key, content)
+    positioned: Vec<(String, String)>,
+    /// Blocks without an explicit position
+    unpositioned: Vec<String>,
+}
+
+impl FileBlocks {
+    /// Add a positioned block, returning an error if the position key is not unique
+    /// or if it contains non-alphabetic characters
+    fn add_positioned(&mut self, at: String, content: String) -> Result<()> {
+        // Validate that position key is not empty
+        if at.is_empty() {
+            return Err(eyre!("Position key must not be empty"));
+        }
+
+        // Validate that position key only contains alphabetic characters
+        if !at.chars().all(|c| c.is_alphabetic()) {
+            return Err(eyre!(
+                "Position key '{}' must contain only alphabetic letters",
+                at
+            ));
+        }
+
+        // Disallow position keys starting with 'm' or 'M'
+        if at.starts_with('m') || at.starts_with('M') {
+            return Err(eyre!(
+                "Position key '{}' must not start with 'm' or 'M'",
+                at
+            ));
+        }
+
+        if self.positioned.iter().any(|(p, _)| p == &at) {
+            return Err(eyre!("Duplicate position key '{}' for the same file", at));
+        }
+        self.positioned.push((at, content));
+        Ok(())
+    }
+
+    /// Add an unpositioned block
+    fn add_unpositioned(&mut self, content: String) {
+        self.unpositioned.push(content);
+    }
+
+    /// Get the concatenated content with blocks sorted lexicographically by position key.
+    /// Unpositioned blocks are implicitly sorted at position "m".
+    fn to_content(&self) -> String {
+        // Collect all blocks with their effective sort keys
+        let mut all_blocks: Vec<(&str, &str)> = Vec::new();
+
+        // Add positioned blocks with their explicit keys
+        for (at, content) in &self.positioned {
+            all_blocks.push((at.as_str(), content.as_str()));
+        }
+
+        // Add unpositioned blocks with implicit "m" key
+        for content in &self.unpositioned {
+            all_blocks.push(("m", content.as_str()));
+        }
+
+        // Sort by position key lexicographically
+        all_blocks.sort_by(|a, b| a.0.cmp(b.0));
+
+        // Extract content and join
+        all_blocks.iter().map(|(_, content)| *content).collect::<Vec<&str>>().join("\n")
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "lit")]
@@ -66,44 +136,57 @@ impl Lit {
         Lit { input, output }
     }
 
+    /// Parse a tangle:// URL to extract the path and optional at parameter
+    /// Returns (path, at) where at is Some(position_key) if present
+    fn parse_tangle_url(url: &str) -> Option<(PathBuf, Option<String>)> {
+        let stripped = url.strip_prefix("tangle://")?;
+
+        if let Some((path, query)) = stripped.split_once('?') {
+            // Parse query parameters - for now we only support at=value
+            let at = query.strip_prefix("at=").map(|s| s.to_string());
+            Some((PathBuf::from(path), at))
+        } else {
+            Some((PathBuf::from(stripped), None))
+        }
+    }
+
     /// Parse markdown content and extract code blocks with tangle:// paths
-    fn parse_markdown(markdown_text: &str) -> HashMap<PathBuf, Vec<String>> {
+    fn parse_markdown(markdown_text: &str) -> Result<HashMap<PathBuf, FileBlocks>> {
         use markdown::mdast::Node;
 
         // Parse markdown to AST
         let ast = match to_mdast(markdown_text, &ParseOptions::default()) {
             Ok(ast) => ast,
-            Err(_) => return HashMap::new(),
+            Err(_) => return Ok(HashMap::new()),
         };
 
-        let mut files: HashMap<PathBuf, Vec<String>> = HashMap::new();
+        let mut files: HashMap<PathBuf, FileBlocks> = HashMap::new();
 
         // Extract snippets from top-level code blocks only
         if let Node::Root(root) = ast {
-            root.children.iter()
-                .filter_map(|child| match child {
-                    Node::Code(code) => Some(code),
-                    _ => None,
-                })
-                .filter_map(|code| {
-                    code.lang.as_ref()
-                        .and_then(|lang| lang.strip_prefix("tangle://"))
-                        .map(|path_str| (path_str, &code.value))
-                })
-                .for_each(|(path_str, value)| {
-                    files
-                        .entry(PathBuf::from(path_str))
-                        .or_insert_with(Vec::new)
-                        .push(value.clone());
-                });
+            for child in &root.children {
+                if let Node::Code(code) = child {
+                    if let Some(lang) = &code.lang {
+                        if let Some((path, at)) = Self::parse_tangle_url(lang) {
+                            let file_blocks = files.entry(path).or_insert_with(FileBlocks::default);
+
+                            if let Some(at_key) = at {
+                                file_blocks.add_positioned(at_key, code.value.clone())?;
+                            } else {
+                                file_blocks.add_unpositioned(code.value.clone());
+                            }
+                        }
+                    }
+                }
+            }
         }
 
-        files
+        Ok(files)
     }
 
     /// Read all markdown files from input directory and parse tangle blocks
-    fn read_blocks(&self) -> Result<HashMap<PathBuf, Vec<String>>> {
-        let mut files: HashMap<PathBuf, Vec<String>> = HashMap::new();
+    fn read_blocks(&self) -> Result<HashMap<PathBuf, FileBlocks>> {
+        let mut files: HashMap<PathBuf, FileBlocks> = HashMap::new();
 
         WalkDir::new(&self.input)
             .into_iter()
@@ -115,11 +198,21 @@ impl Lit {
             })
             .try_for_each(|entry| -> Result<()> {
                 let content = fs::read_to_string(entry.path())?;
-                let blocks = Self::parse_markdown(&content);
+                let blocks = Self::parse_markdown(&content)?;
 
                 // Merge the parsed blocks into our files HashMap
-                for (path, contents) in blocks {
-                    files.entry(path).or_insert_with(Vec::new).extend(contents);
+                for (path, file_blocks) in blocks {
+                    let target = files.entry(path).or_insert_with(FileBlocks::default);
+
+                    // Add positioned blocks
+                    for (at, content) in file_blocks.positioned {
+                        target.add_positioned(at, content)?;
+                    }
+
+                    // Add unpositioned blocks
+                    for content in file_blocks.unpositioned {
+                        target.add_unpositioned(content);
+                    }
                 }
                 Ok(())
             })?;
@@ -128,11 +221,11 @@ impl Lit {
     }
 
     /// Create TangledFiles by concatenating all snippets for each file
-    fn to_tangled_files(blocks: HashMap<PathBuf, Vec<String>>) -> TangledFiles {
+    fn to_tangled_files(blocks: HashMap<PathBuf, FileBlocks>) -> TangledFiles {
         let files = blocks
             .iter()
-            .map(|(path, snippets)| {
-                let content = snippets.join("\n");
+            .map(|(path, file_blocks)| {
+                let content = file_blocks.to_content();
                 (path.clone(), content)
             })
             .collect();
@@ -184,9 +277,11 @@ fn main() {
 ```
 "#;
 
-        let blocks = Lit::parse_markdown(markdown);
+        let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks.get(&PathBuf::from("src/main.rs")).unwrap()[0], "fn main() {\n    println!(\"Hello\");\n}");
+        let file_blocks = blocks.get(&PathBuf::from("src/main.rs")).unwrap();
+        assert_eq!(file_blocks.unpositioned.len(), 1);
+        assert_eq!(file_blocks.unpositioned[0], "fn main() {\n    println!(\"Hello\");\n}");
     }
 
     #[test]
@@ -204,12 +299,12 @@ code 2
 ```
 "#;
 
-        let blocks = Lit::parse_markdown(markdown);
+        let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 2);
         assert!(blocks.contains_key(&PathBuf::from("file1.rs")));
         assert!(blocks.contains_key(&PathBuf::from("file2.rs")));
-        assert_eq!(blocks.get(&PathBuf::from("file1.rs")).unwrap()[0], "code 1");
-        assert_eq!(blocks.get(&PathBuf::from("file2.rs")).unwrap()[0], "code 2");
+        assert_eq!(blocks.get(&PathBuf::from("file1.rs")).unwrap().unpositioned[0], "code 1");
+        assert_eq!(blocks.get(&PathBuf::from("file2.rs")).unwrap().unpositioned[0], "code 2");
     }
 
     #[test]
@@ -227,9 +322,9 @@ let y = 10;
 ```
 "#;
 
-        let blocks = Lit::parse_markdown(markdown);
+        let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks.get(&PathBuf::from("output.rs")).unwrap()[0], "// This should be extracted\nlet y = 10;");
+        assert_eq!(blocks.get(&PathBuf::from("output.rs")).unwrap().unpositioned[0], "// This should be extracted\nlet y = 10;");
     }
 
     #[test]
@@ -247,9 +342,9 @@ Top level content
 > ```
 "#;
 
-        let blocks = Lit::parse_markdown(markdown);
+        let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks.get(&PathBuf::from("top-level.txt")).unwrap()[0], "Top level content");
+        assert_eq!(blocks.get(&PathBuf::from("top-level.txt")).unwrap().unpositioned[0], "Top level content");
     }
 
     #[test]
@@ -268,15 +363,15 @@ Top level content
   ```
 "#;
 
-        let blocks = Lit::parse_markdown(markdown);
+        let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks.get(&PathBuf::from("top-level.txt")).unwrap()[0], "Top level content");
+        assert_eq!(blocks.get(&PathBuf::from("top-level.txt")).unwrap().unpositioned[0], "Top level content");
     }
 
     #[test]
     fn test_parse_empty_markdown() {
         let markdown = "";
-        let blocks = Lit::parse_markdown(markdown);
+        let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 0);
     }
 
@@ -293,7 +388,7 @@ Regular code block
 More text.
 "#;
 
-        let blocks = Lit::parse_markdown(markdown);
+        let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 0);
     }
 
@@ -303,9 +398,9 @@ More text.
 pub fn helper() {}
 ```"#;
 
-        let blocks = Lit::parse_markdown(markdown);
+        let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks.get(&PathBuf::from("src/modules/utils.rs")).unwrap()[0], "pub fn helper() {}");
+        assert_eq!(blocks.get(&PathBuf::from("src/modules/utils.rs")).unwrap().unpositioned[0], "pub fn helper() {}");
     }
 
     #[test]
@@ -313,15 +408,18 @@ pub fn helper() {}
         let markdown = r#"```tangle://empty.txt
 ```"#;
 
-        let blocks = Lit::parse_markdown(markdown);
+        let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks.get(&PathBuf::from("empty.txt")).unwrap()[0], "");
+        assert_eq!(blocks.get(&PathBuf::from("empty.txt")).unwrap().unpositioned[0], "");
     }
 
     #[test]
     fn test_to_tangled_files_concatenates_snippets() {
         let mut blocks = HashMap::new();
-        blocks.insert(PathBuf::from("output.txt"), vec!["Line 1".to_string(), "Line 2".to_string()]);
+        let mut file_blocks = FileBlocks::default();
+        file_blocks.add_unpositioned("Line 1".to_string());
+        file_blocks.add_unpositioned("Line 2".to_string());
+        blocks.insert(PathBuf::from("output.txt"), file_blocks);
 
         let tangled = Lit::to_tangled_files(blocks);
 
@@ -332,8 +430,13 @@ pub fn helper() {}
     #[test]
     fn test_to_tangled_files_multiple_files() {
         let mut blocks = HashMap::new();
-        blocks.insert(PathBuf::from("file1.txt"), vec!["Content 1".to_string()]);
-        blocks.insert(PathBuf::from("file2.txt"), vec!["Content 2".to_string()]);
+        let mut file_blocks1 = FileBlocks::default();
+        file_blocks1.add_unpositioned("Content 1".to_string());
+        blocks.insert(PathBuf::from("file1.txt"), file_blocks1);
+
+        let mut file_blocks2 = FileBlocks::default();
+        file_blocks2.add_unpositioned("Content 2".to_string());
+        blocks.insert(PathBuf::from("file2.txt"), file_blocks2);
 
         let tangled = Lit::to_tangled_files(blocks);
 
@@ -392,5 +495,222 @@ Nested file
         fs::remove_dir_all(&temp_output)?;
 
         Ok(())
+    }
+
+    #[test]
+    fn test_parse_block_with_at() {
+        let markdown = r#"```tangle://output.txt?at=a
+First block
+```"#;
+
+        let blocks = Lit::parse_markdown(markdown).unwrap();
+        assert_eq!(blocks.len(), 1);
+        let file_blocks = blocks.get(&PathBuf::from("output.txt")).unwrap();
+        assert_eq!(file_blocks.positioned.len(), 1);
+        assert_eq!(file_blocks.positioned[0].0, "a");
+        assert_eq!(file_blocks.positioned[0].1, "First block");
+    }
+
+    #[test]
+    fn test_parse_multiple_blocks_with_different_positions() {
+        let markdown = r#"```tangle://output.txt?at=c
+Third block
+```
+
+```tangle://output.txt?at=a
+First block
+```
+
+```tangle://output.txt?at=b
+Second block
+```"#;
+
+        let blocks = Lit::parse_markdown(markdown).unwrap();
+        assert_eq!(blocks.len(), 1);
+        let file_blocks = blocks.get(&PathBuf::from("output.txt")).unwrap();
+        assert_eq!(file_blocks.positioned.len(), 3);
+    }
+
+    #[test]
+    fn test_positioned_blocks_sorted_lexicographically() {
+        let markdown = r#"```tangle://output.txt?at=c
+Third
+```
+
+```tangle://output.txt?at=a
+First
+```
+
+```tangle://output.txt?at=b
+Second
+```"#;
+
+        let blocks = Lit::parse_markdown(markdown).unwrap();
+        let file_blocks = blocks.get(&PathBuf::from("output.txt")).unwrap();
+        let content = file_blocks.to_content();
+        assert_eq!(content, "First\nSecond\nThird");
+    }
+
+    #[test]
+    fn test_positioned_blocks_around_implicit_m() {
+        let markdown = r#"```tangle://output.txt
+Unpositioned 1
+```
+
+```tangle://output.txt?at=a
+Before m
+```
+
+```tangle://output.txt?at=z
+After m
+```
+
+```tangle://output.txt
+Unpositioned 2
+```"#;
+
+        let blocks = Lit::parse_markdown(markdown).unwrap();
+        let file_blocks = blocks.get(&PathBuf::from("output.txt")).unwrap();
+        let content = file_blocks.to_content();
+        // "a" < "m" (implicit for unpositioned) < "z"
+        assert_eq!(content, "Before m\nUnpositioned 1\nUnpositioned 2\nAfter m");
+    }
+
+    #[test]
+    fn test_duplicate_position_key_returns_error() {
+        let markdown = r#"```tangle://output.txt?at=a
+First
+```
+
+```tangle://output.txt?at=a
+Duplicate
+```"#;
+
+        let result = Lit::parse_markdown(markdown);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Duplicate position key"));
+    }
+
+    #[test]
+    fn test_parse_tangle_url_without_at() {
+        let result = Lit::parse_tangle_url("tangle://path/to/file.txt");
+        assert_eq!(result, Some((PathBuf::from("path/to/file.txt"), None)));
+    }
+
+    #[test]
+    fn test_parse_tangle_url_with_at() {
+        let result = Lit::parse_tangle_url("tangle://path/to/file.txt?at=xyz");
+        assert_eq!(result, Some((PathBuf::from("path/to/file.txt"), Some("xyz".to_string()))));
+    }
+
+    #[test]
+    fn test_parse_tangle_url_with_query_but_no_at() {
+        let result = Lit::parse_tangle_url("tangle://path/to/file.txt?other=value");
+        assert_eq!(result, Some((PathBuf::from("path/to/file.txt"), None)));
+    }
+
+    #[test]
+    fn test_parse_tangle_url_non_tangle() {
+        let result = Lit::parse_tangle_url("rust");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_numeric_position_keys_rejected() {
+        let markdown = r#"```tangle://output.txt?at=10
+Ten
+```"#;
+
+        let result = Lit::parse_markdown(markdown);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must contain only alphabetic letters"));
+    }
+
+    #[test]
+    fn test_position_key_with_numbers_rejected() {
+        let markdown = r#"```tangle://output.txt?at=a1
+Mixed
+```"#;
+
+        let result = Lit::parse_markdown(markdown);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must contain only alphabetic letters"));
+    }
+
+    #[test]
+    fn test_position_key_with_special_chars_rejected() {
+        let markdown = r#"```tangle://output.txt?at=a-b
+Special
+```"#;
+
+        let result = Lit::parse_markdown(markdown);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must contain only alphabetic letters"));
+    }
+
+    #[test]
+    fn test_empty_position_key_rejected() {
+        let markdown = r#"```tangle://output.txt?at=
+Empty
+```"#;
+
+        let result = Lit::parse_markdown(markdown);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn test_position_key_starting_with_m_rejected() {
+        let markdown = r#"```tangle://output.txt?at=main
+Content
+```"#;
+
+        let result = Lit::parse_markdown(markdown);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must not start with 'm' or 'M'"));
+    }
+
+    #[test]
+    fn test_position_key_starting_with_capital_m_rejected() {
+        let markdown = r#"```tangle://output.txt?at=Main
+Content
+```"#;
+
+        let result = Lit::parse_markdown(markdown);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must not start with 'm' or 'M'"));
+    }
+
+    #[test]
+    fn test_position_key_just_m_rejected() {
+        let markdown = r#"```tangle://output.txt?at=m
+Content
+```"#;
+
+        let result = Lit::parse_markdown(markdown);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must not start with 'm' or 'M'"));
+    }
+
+    #[test]
+    fn test_alphabetic_position_keys_allowed() {
+        let markdown = r#"```tangle://output.txt?at=abc
+First
+```
+
+```tangle://output.txt?at=xyz
+Second
+```
+
+```tangle://output.txt?at=ABC
+Third
+```"#;
+
+        let blocks = Lit::parse_markdown(markdown).unwrap();
+        let file_blocks = blocks.get(&PathBuf::from("output.txt")).unwrap();
+        assert_eq!(file_blocks.positioned.len(), 3);
+        let content = file_blocks.to_content();
+        // Lexicographic: "ABC" < "abc" < "xyz"
+        assert_eq!(content, "Third\nFirst\nSecond");
     }
 }
