@@ -85,9 +85,9 @@ struct Args {
     #[arg(value_name = "INPUT")]
     directory: PathBuf,
 
-    /// Output directory for tangled files
+    /// Output directory for tangled files (defaults to INPUT/out)
     #[arg(value_name = "OUTPUT")]
-    output: PathBuf,
+    output: Option<PathBuf>,
 }
 
 /// Manages input and output directories for literate programming
@@ -249,11 +249,12 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     let args = Args::parse();
+    let output = args.output.unwrap_or_else(|| args.directory.join("out"));
 
     println!("Reading markdown files from: {}", args.directory.display());
-    println!("Writing tangled files to: {}\n", args.output.display());
+    println!("Writing tangled files to: {}\n", output.display());
 
-    let lit = Lit::new(args.directory, args.output);
+    let lit = Lit::new(args.directory, output);
     lit.tangle()?;
 
     println!("Tangling complete!");
