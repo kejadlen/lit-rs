@@ -120,57 +120,6 @@ impl TryFrom<&Node> for Block {
     }
 }
 
-/// Represents blocks for a single file, with positioned and unpositioned blocks separated
-#[derive(Debug, Default)]
-struct FileBlocks {
-    /// Blocks with an explicit position (position_key, content)
-    positioned: Vec<(Position, String)>,
-    /// Blocks without an explicit position
-    unpositioned: Vec<String>,
-}
-
-impl FileBlocks {
-    /// Add a block with an optional position key.
-    /// If at is Some, adds to positioned blocks.
-    /// If at is None, adds to unpositioned blocks (implicit position "m").
-    fn add(&mut self, at: Option<Position>, content: String) -> Result<()> {
-        match at {
-            Some(at) => {
-                self.positioned.push((at, content));
-            }
-            None => {
-                self.unpositioned.push(content);
-            }
-        }
-        Ok(())
-    }
-
-    /// Get the concatenated content with blocks sorted lexicographically by position key.
-    /// Unpositioned blocks are implicitly sorted at position "m".
-    fn to_content(&self) -> String {
-        let mut all_blocks: Vec<(&str, &str)> = Vec::new();
-
-        for (at, content) in &self.positioned {
-            all_blocks.push((at.as_ref(), content.as_str()));
-        }
-
-        // Add unpositioned blocks with implicit "m" key
-        for content in &self.unpositioned {
-            all_blocks.push(("m", content.as_str()));
-        }
-
-        all_blocks.sort_by(|a, b| a.0.cmp(b.0));
-
-        let content = all_blocks
-            .iter()
-            .map(|(_, content)| *content)
-            .collect::<Vec<&str>>()
-            .join("\n\n");
-
-        format!("{content}\n")
-    }
-}
-
 #[derive(Parser, Debug)]
 #[command(name = "lit")]
 #[command(about = "A literate programming tool", long_about = None)]
@@ -200,13 +149,13 @@ impl Lit {
     }
 
     /// Parse markdown content and extract code blocks with tangle:// paths
-    fn parse_markdown(markdown_text: &str) -> Result<HashMap<PathBuf, FileBlocks>> {
+    fn parse_markdown(markdown_text: &str) -> Result<Vec<Block>> {
         let ast = match to_mdast(markdown_text, &ParseOptions::default()) {
             Ok(ast) => ast,
-            Err(_) => return Ok(HashMap::new()),
+            Err(_) => return Ok(Vec::new()),
         };
 
-        let mut files: HashMap<PathBuf, FileBlocks> = HashMap::new();
+        let mut blocks = Vec::new();
 
         // Extract snippets from top-level code blocks only
         if let Node::Root(root) = ast {
@@ -214,8 +163,7 @@ impl Lit {
                 // Try to parse as a Block - skip if it's not a tangle block
                 match Block::try_from(child) {
                     Ok(block) => {
-                        let file_blocks = files.entry(block.path).or_default();
-                        file_blocks.add(block.position, block.content)?;
+                        blocks.push(block);
                     }
                     Err(BlockError::NotTangleBlock) => {
                         // Skip non-tangle code blocks silently
@@ -228,55 +176,63 @@ impl Lit {
             }
         }
 
-        Ok(files)
+        Ok(blocks)
     }
 
     /// Read all markdown files from input directory and parse tangle blocks
-    fn read_blocks(&self) -> Result<HashMap<PathBuf, FileBlocks>> {
-        let mut files: HashMap<PathBuf, FileBlocks> = HashMap::new();
-
+    fn read_blocks(&self) -> Result<HashMap<PathBuf, Vec<Block>>> {
         WalkDir::new(&self.input)
             .into_iter()
             .filter_map(|e| e.ok())
             .filter(|entry| entry.file_type().is_file())
             .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "md"))
-            .try_for_each(|entry| -> Result<()> {
-                let content = fs::read_to_string(entry.path())?;
-                let blocks = Self::parse_markdown(&content)?;
+            .try_fold(
+                HashMap::<PathBuf, Vec<Block>>::new(),
+                |mut files, entry| -> Result<_> {
+                    let content = fs::read_to_string(entry.path())?;
+                    let blocks = Self::parse_markdown(&content)?;
 
-                for (path, file_blocks) in blocks {
-                    let target = files.entry(path).or_default();
-
-                    for (at, content) in file_blocks.positioned {
-                        target.add(Some(at), content)?;
+                    for block in blocks {
+                        files.entry(block.path.clone()).or_default().push(block);
                     }
 
-                    for content in file_blocks.unpositioned {
-                        target.add(None, content)?;
-                    }
-                }
-                Ok(())
-            })?;
-
-        Ok(files)
+                    Ok(files)
+                },
+            )
     }
 
     /// Tangle the code blocks: read from input, parse, and write to output
     fn tangle(&self) -> Result<()> {
-        let blocks = self.read_blocks()?;
+        let files = self.read_blocks()?;
 
-        for (path, file_blocks) in blocks {
-            let content = file_blocks.to_content();
-            let full_path = self.output.join(path);
+        // Process each file using try_for_each
+        files
+            .into_iter()
+            .try_for_each(|(path, mut blocks)| -> Result<()> {
+                // Sort blocks by position (None -> "m")
+                blocks.sort_by(|a, b| {
+                    let a_key = a.position.as_ref().map(|p| p.as_ref()).unwrap_or("m");
+                    let b_key = b.position.as_ref().map(|p| p.as_ref()).unwrap_or("m");
+                    a_key.cmp(b_key)
+                });
 
-            if let Some(parent) = full_path.parent() {
-                fs::create_dir_all(parent)?;
-            }
+                // Concatenate content
+                let content = blocks
+                    .iter()
+                    .map(|b| b.content.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                let content = format!("{content}\n");
 
-            fs::write(&full_path, content)?;
-        }
+                // Write to file
+                let full_path = self.output.join(path);
+                if let Some(parent) = full_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::write(&full_path, content)?;
 
-        Ok(())
+                Ok(())
+            })
     }
 }
 
@@ -321,12 +277,9 @@ fn main() {
 
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
-        let file_blocks = blocks.get(&PathBuf::from("src/main.rs")).unwrap();
-        assert_eq!(file_blocks.unpositioned.len(), 1);
-        assert_eq!(
-            file_blocks.unpositioned[0],
-            "fn main() {\n    println!(\"Hello\");\n}"
-        );
+        assert_eq!(blocks[0].path, PathBuf::from("src/main.rs"));
+        assert_eq!(blocks[0].position, None);
+        assert_eq!(blocks[0].content, "fn main() {\n    println!(\"Hello\");\n}");
     }
 
     #[test]
@@ -346,16 +299,10 @@ code 2
 
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 2);
-        assert!(blocks.contains_key(&PathBuf::from("file1.rs")));
-        assert!(blocks.contains_key(&PathBuf::from("file2.rs")));
-        assert_eq!(
-            blocks.get(&PathBuf::from("file1.rs")).unwrap().unpositioned[0],
-            "code 1"
-        );
-        assert_eq!(
-            blocks.get(&PathBuf::from("file2.rs")).unwrap().unpositioned[0],
-            "code 2"
-        );
+        assert_eq!(blocks[0].path, PathBuf::from("file1.rs"));
+        assert_eq!(blocks[0].content, "code 1");
+        assert_eq!(blocks[1].path, PathBuf::from("file2.rs"));
+        assert_eq!(blocks[1].content, "code 2");
     }
 
     #[test]
@@ -375,13 +322,8 @@ let y = 10;
 
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
-        assert_eq!(
-            blocks
-                .get(&PathBuf::from("output.rs"))
-                .unwrap()
-                .unpositioned[0],
-            "// This should be extracted\nlet y = 10;"
-        );
+        assert_eq!(blocks[0].path, PathBuf::from("output.rs"));
+        assert_eq!(blocks[0].content, "// This should be extracted\nlet y = 10;");
     }
 
     #[test]
@@ -401,13 +343,8 @@ Top level content
 
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
-        assert_eq!(
-            blocks
-                .get(&PathBuf::from("top-level.txt"))
-                .unwrap()
-                .unpositioned[0],
-            "Top level content"
-        );
+        assert_eq!(blocks[0].path, PathBuf::from("top-level.txt"));
+        assert_eq!(blocks[0].content, "Top level content");
     }
 
     #[test]
@@ -428,13 +365,8 @@ Top level content
 
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
-        assert_eq!(
-            blocks
-                .get(&PathBuf::from("top-level.txt"))
-                .unwrap()
-                .unpositioned[0],
-            "Top level content"
-        );
+        assert_eq!(blocks[0].path, PathBuf::from("top-level.txt"));
+        assert_eq!(blocks[0].content, "Top level content");
     }
 
     #[test]
@@ -469,13 +401,8 @@ pub fn helper() {}
 
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
-        assert_eq!(
-            blocks
-                .get(&PathBuf::from("src/modules/utils.rs"))
-                .unwrap()
-                .unpositioned[0],
-            "pub fn helper() {}"
-        );
+        assert_eq!(blocks[0].path, PathBuf::from("src/modules/utils.rs"));
+        assert_eq!(blocks[0].content, "pub fn helper() {}");
     }
 
     #[test]
@@ -485,13 +412,8 @@ pub fn helper() {}
 
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
-        assert_eq!(
-            blocks
-                .get(&PathBuf::from("empty.txt"))
-                .unwrap()
-                .unpositioned[0],
-            ""
-        );
+        assert_eq!(blocks[0].path, PathBuf::from("empty.txt"));
+        assert_eq!(blocks[0].content, "");
     }
 
     #[test]
@@ -547,10 +469,9 @@ First block
 
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
-        let file_blocks = blocks.get(&PathBuf::from("output.txt")).unwrap();
-        assert_eq!(file_blocks.positioned.len(), 1);
-        assert_eq!(file_blocks.positioned[0].0.as_ref(), "a");
-        assert_eq!(file_blocks.positioned[0].1, "First block");
+        assert_eq!(blocks[0].path, PathBuf::from("output.txt"));
+        assert_eq!(blocks[0].position.as_ref().map(|p| p.as_ref()), Some("a"));
+        assert_eq!(blocks[0].content, "First block");
     }
 
     #[test]
@@ -568,9 +489,9 @@ Second block
 ```"#;
 
         let blocks = Lit::parse_markdown(markdown).unwrap();
-        assert_eq!(blocks.len(), 1);
-        let file_blocks = blocks.get(&PathBuf::from("output.txt")).unwrap();
-        assert_eq!(file_blocks.positioned.len(), 3);
+        assert_eq!(blocks.len(), 3);
+        assert!(blocks.iter().all(|b| b.path == PathBuf::from("output.txt")));
+        assert!(blocks.iter().all(|b| b.position.is_some()));
     }
 
     #[test]
@@ -587,9 +508,18 @@ First
 Second
 ```"#;
 
-        let blocks = Lit::parse_markdown(markdown).unwrap();
-        let file_blocks = blocks.get(&PathBuf::from("output.txt")).unwrap();
-        let content = file_blocks.to_content();
+        let mut blocks = Lit::parse_markdown(markdown).unwrap();
+        blocks.sort_by(|a, b| {
+            let a_key = a.position.as_ref().map(|p| p.as_ref()).unwrap_or("m");
+            let b_key = b.position.as_ref().map(|p| p.as_ref()).unwrap_or("m");
+            a_key.cmp(b_key)
+        });
+        let content = blocks
+            .iter()
+            .map(|b| b.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let content = format!("{content}\n");
         assert_eq!(content, "First\n\nSecond\n\nThird\n");
     }
 
@@ -611,9 +541,18 @@ After m
 Unpositioned 2
 ```"#;
 
-        let blocks = Lit::parse_markdown(markdown).unwrap();
-        let file_blocks = blocks.get(&PathBuf::from("output.txt")).unwrap();
-        let content = file_blocks.to_content();
+        let mut blocks = Lit::parse_markdown(markdown).unwrap();
+        blocks.sort_by(|a, b| {
+            let a_key = a.position.as_ref().map(|p| p.as_ref()).unwrap_or("m");
+            let b_key = b.position.as_ref().map(|p| p.as_ref()).unwrap_or("m");
+            a_key.cmp(b_key)
+        });
+        let content = blocks
+            .iter()
+            .map(|b| b.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let content = format!("{content}\n");
         // "a" < "m" (implicit for unpositioned) < "z"
         assert_eq!(
             content,
@@ -632,11 +571,25 @@ Duplicate
 ```"#;
 
         let blocks = Lit::parse_markdown(markdown).unwrap();
-        let file_blocks = blocks.get(&PathBuf::from("output.txt")).unwrap();
-        assert_eq!(file_blocks.positioned.len(), 2);
-        assert_eq!(file_blocks.positioned[0].0.as_ref(), "a");
-        assert_eq!(file_blocks.positioned[1].0.as_ref(), "a");
-        let content = file_blocks.to_content();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].path, PathBuf::from("output.txt"));
+        assert_eq!(blocks[0].position.as_ref().map(|p| p.as_ref()), Some("a"));
+        assert_eq!(blocks[1].path, PathBuf::from("output.txt"));
+        assert_eq!(blocks[1].position.as_ref().map(|p| p.as_ref()), Some("a"));
+
+        // Sort and concatenate like tangle does
+        let mut blocks = blocks;
+        blocks.sort_by(|a, b| {
+            let a_key = a.position.as_ref().map(|p| p.as_ref()).unwrap_or("m");
+            let b_key = b.position.as_ref().map(|p| p.as_ref()).unwrap_or("m");
+            a_key.cmp(b_key)
+        });
+        let content = blocks
+            .iter()
+            .map(|b| b.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let content = format!("{content}\n");
         assert_eq!(content, "First\n\nDuplicate\n");
     }
 
@@ -808,10 +761,10 @@ Content
 ```"#;
 
         let blocks = Lit::parse_markdown(markdown).unwrap();
-        let file_blocks = blocks.get(&PathBuf::from("output.txt")).unwrap();
-        assert_eq!(file_blocks.positioned.len(), 1);
-        assert_eq!(file_blocks.positioned[0].0.as_ref(), "main");
-        assert_eq!(file_blocks.positioned[0].1, "Content");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].path, PathBuf::from("output.txt"));
+        assert_eq!(blocks[0].position.as_ref().map(|p| p.as_ref()), Some("main"));
+        assert_eq!(blocks[0].content, "Content");
     }
 
     #[test]
@@ -837,10 +790,10 @@ Content
 ```"#;
 
         let blocks = Lit::parse_markdown(markdown).unwrap();
-        let file_blocks = blocks.get(&PathBuf::from("output.txt")).unwrap();
-        assert_eq!(file_blocks.positioned.len(), 1);
-        assert_eq!(file_blocks.positioned[0].0.as_ref(), "m");
-        assert_eq!(file_blocks.positioned[0].1, "Content");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].path, PathBuf::from("output.txt"));
+        assert_eq!(blocks[0].position.as_ref().map(|p| p.as_ref()), Some("m"));
+        assert_eq!(blocks[0].content, "Content");
     }
 
     #[test]
@@ -857,10 +810,19 @@ Second
 Third
 ```"#;
 
-        let blocks = Lit::parse_markdown(markdown).unwrap();
-        let file_blocks = blocks.get(&PathBuf::from("output.txt")).unwrap();
-        assert_eq!(file_blocks.positioned.len(), 3);
-        let content = file_blocks.to_content();
+        let mut blocks = Lit::parse_markdown(markdown).unwrap();
+        assert_eq!(blocks.len(), 3);
+        blocks.sort_by(|a, b| {
+            let a_key = a.position.as_ref().map(|p| p.as_ref()).unwrap_or("m");
+            let b_key = b.position.as_ref().map(|p| p.as_ref()).unwrap_or("m");
+            a_key.cmp(b_key)
+        });
+        let content = blocks
+            .iter()
+            .map(|b| b.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let content = format!("{content}\n");
         // Lexicographic: "abc" < "def" < "xyz"
         assert_eq!(content, "First\n\nThird\n\nSecond\n");
     }
