@@ -1,5 +1,5 @@
 use clap::Parser;
-use color_eyre::{Result, eyre::bail, eyre::ensure};
+use color_eyre::{Result, eyre::bail};
 use markdown::{ParseOptions, mdast::Node, to_mdast};
 use std::collections::HashMap;
 use std::fs;
@@ -17,8 +17,6 @@ enum PositionError {
     Empty,
     #[error("Position key '{0}' must contain only lowercase letters")]
     InvalidCharacters(String),
-    #[error("Position key '{0}' must not start with 'm'")]
-    ReservedPrefix(String),
 }
 
 /// Errors that can occur when parsing a block from a markdown node
@@ -50,10 +48,6 @@ impl TryFrom<String> for Position {
 
         if !value.chars().all(|c| c.is_ascii_lowercase()) {
             return Err(PositionError::InvalidCharacters(value));
-        }
-
-        if value.starts_with('m') {
-            return Err(PositionError::ReservedPrefix(value));
         }
 
         Ok(Position(value))
@@ -138,15 +132,10 @@ struct FileBlocks {
 impl FileBlocks {
     /// Add a block with an optional position key.
     /// If at is Some, adds to positioned blocks.
-    /// If at is None, adds to unpositioned blocks.
+    /// If at is None, adds to unpositioned blocks (implicit position "m").
     fn add(&mut self, at: Option<Position>, content: String) -> Result<()> {
         match at {
             Some(at) => {
-                ensure!(
-                    !self.positioned.iter().any(|(p, _)| p == &at),
-                    "Duplicate position key '{}' for the same file",
-                    at.as_ref()
-                );
                 self.positioned.push((at, content));
             }
             None => {
@@ -633,7 +622,7 @@ Unpositioned 2
     }
 
     #[test]
-    fn test_duplicate_position_key_returns_error() {
+    fn test_duplicate_position_keys_allowed() {
         let markdown = r#"```tangle:///output.txt?at=a
 First
 ```
@@ -642,14 +631,13 @@ First
 Duplicate
 ```"#;
 
-        let result = Lit::parse_markdown(markdown);
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Duplicate position key")
-        );
+        let blocks = Lit::parse_markdown(markdown).unwrap();
+        let file_blocks = blocks.get(&PathBuf::from("output.txt")).unwrap();
+        assert_eq!(file_blocks.positioned.len(), 2);
+        assert_eq!(file_blocks.positioned[0].0.as_ref(), "a");
+        assert_eq!(file_blocks.positioned[1].0.as_ref(), "a");
+        let content = file_blocks.to_content();
+        assert_eq!(content, "First\n\nDuplicate\n");
     }
 
     #[test]
@@ -814,19 +802,16 @@ Empty
     }
 
     #[test]
-    fn test_position_key_starting_with_m_rejected() {
+    fn test_position_key_starting_with_m_allowed() {
         let markdown = r#"```tangle:///output.txt?at=main
 Content
 ```"#;
 
-        let result = Lit::parse_markdown(markdown);
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("must not start with 'm'")
-        );
+        let blocks = Lit::parse_markdown(markdown).unwrap();
+        let file_blocks = blocks.get(&PathBuf::from("output.txt")).unwrap();
+        assert_eq!(file_blocks.positioned.len(), 1);
+        assert_eq!(file_blocks.positioned[0].0.as_ref(), "main");
+        assert_eq!(file_blocks.positioned[0].1, "Content");
     }
 
     #[test]
@@ -846,19 +831,16 @@ Content
     }
 
     #[test]
-    fn test_position_key_just_m_rejected() {
+    fn test_position_key_just_m_allowed() {
         let markdown = r#"```tangle:///output.txt?at=m
 Content
 ```"#;
 
-        let result = Lit::parse_markdown(markdown);
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("must not start with 'm'")
-        );
+        let blocks = Lit::parse_markdown(markdown).unwrap();
+        let file_blocks = blocks.get(&PathBuf::from("output.txt")).unwrap();
+        assert_eq!(file_blocks.positioned.len(), 1);
+        assert_eq!(file_blocks.positioned[0].0.as_ref(), "m");
+        assert_eq!(file_blocks.positioned[0].1, "Content");
     }
 
     #[test]
