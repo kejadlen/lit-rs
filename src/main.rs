@@ -54,6 +54,29 @@ impl Loom {
         Loom { files }
     }
 
+    /// Walk a directory and parse all markdown files, collecting tangle blocks
+    fn from_directory(directory: &PathBuf) -> Result<Self> {
+        let mut files: HashMap<PathBuf, Vec<String>> = HashMap::new();
+
+        for entry in WalkDir::new(directory).into_iter().filter_map(|e| e.ok()) {
+            if entry.file_type().is_file() {
+                if let Some(ext) = entry.path().extension() {
+                    if ext == "md" {
+                        let content = fs::read_to_string(entry.path())?;
+                        let loom = Loom::from_markdown(&content);
+
+                        // Merge the parsed loom into our files HashMap
+                        for (path, contents) in loom.files {
+                            files.entry(path).or_insert_with(Vec::new).extend(contents);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(Loom { files })
+    }
+
     /// Create an iterator over all snippets as (path, content) tuples
     fn iter(&self) -> impl Iterator<Item = (&PathBuf, &str)> + '_ {
         self.files.iter().flat_map(|(path, contents)| {
@@ -72,12 +95,6 @@ impl Loom {
     }
 }
 
-/// Parse a markdown file and extract all tangle code blocks
-fn parse_markdown_file(path: &PathBuf) -> Result<Loom> {
-    let content = fs::read_to_string(path)?;
-    Ok(Loom::from_markdown(&content))
-}
-
 fn main() -> Result<()> {
     color_eyre::install()?;
     tracing_subscriber::fmt::init();
@@ -86,35 +103,15 @@ fn main() -> Result<()> {
 
     println!("Processing markdown files in {}:\n", args.directory.display());
 
-    for entry in WalkDir::new(&args.directory)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        if entry.file_type().is_file() {
-            if let Some(ext) = entry.path().extension() {
-                if ext == "md" {
-                    let path = entry.path().to_path_buf();
-                    println!("File: {}", path.display());
+    let loom = Loom::from_directory(&args.directory)?;
 
-                    match parse_markdown_file(&path) {
-                        Ok(loom) => {
-                            if loom.is_empty() {
-                                println!("  No tangle blocks found");
-                            } else {
-                                println!("  Found {} tangle block(s):", loom.len());
-                                for (path, content) in loom.iter() {
-                                    println!("    → {}", path.display());
-                                    println!("      {} lines", content.lines().count());
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("  Error parsing file: {}", e);
-                        }
-                    }
-                    println!();
-                }
-            }
+    if loom.is_empty() {
+        println!("No tangle blocks found");
+    } else {
+        println!("Found {} tangle block(s) across all files:\n", loom.len());
+        for (path, content) in loom.iter() {
+            println!("  → {}", path.display());
+            println!("    {} lines", content.lines().count());
         }
     }
 
