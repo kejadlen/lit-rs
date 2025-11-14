@@ -1,6 +1,6 @@
 use clap::Parser;
-use color_eyre::{Result, eyre::bail, eyre::ensure};
-use markdown::{ParseOptions, mdast::Node, to_mdast};
+use color_eyre::{eyre::bail, eyre::ensure, Result};
+use markdown::{mdast::Node, ParseOptions, to_mdast};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -9,13 +9,43 @@ use tracing_subscriber::EnvFilter;
 use url::Url;
 use walkdir::WalkDir;
 
+/// Represents a validated position key for ordering blocks
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct Position(String);
+
+impl TryFrom<String> for Position {
+    type Error = color_eyre::Report;
+
+    fn try_from(value: String) -> Result<Self> {
+        ensure!(!value.is_empty(), "Position key must not be empty");
+
+        ensure!(
+            value.chars().all(|c| c.is_ascii_lowercase()),
+            "Position key '{value}' must contain only lowercase letters"
+        );
+
+        ensure!(
+            !value.starts_with('m'),
+            "Position key '{value}' must not start with 'm'"
+        );
+
+        Ok(Position(value))
+    }
+}
+
+impl AsRef<str> for Position {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Represents a single tangle block from markdown
 #[derive(Debug, Clone)]
 struct Block {
     /// The file path to write this block to
     path: PathBuf,
     /// Optional position key for ordering
-    position: Option<String>,
+    position: Option<Position>,
     /// The content of the code block
     content: String,
 }
@@ -58,7 +88,8 @@ impl TryFrom<&Node> for Block {
         let position = parsed
             .query_pairs()
             .find(|(key, _)| key == "at")
-            .map(|(_, value)| value.to_string());
+            .map(|(_, value)| Position::try_from(value.to_string()))
+            .transpose()?;
 
         Ok(Block {
             path: PathBuf::from(path_str),
@@ -72,33 +103,22 @@ impl TryFrom<&Node> for Block {
 #[derive(Debug, Default)]
 struct FileBlocks {
     /// Blocks with an explicit position (position_key, content)
-    positioned: Vec<(String, String)>,
+    positioned: Vec<(Position, String)>,
     /// Blocks without an explicit position
     unpositioned: Vec<String>,
 }
 
 impl FileBlocks {
     /// Add a block with an optional position key.
-    /// If at is Some, validates and adds to positioned blocks.
+    /// If at is Some, adds to positioned blocks.
     /// If at is None, adds to unpositioned blocks.
-    fn add(&mut self, at: Option<String>, content: String) -> Result<()> {
+    fn add(&mut self, at: Option<Position>, content: String) -> Result<()> {
         match at {
             Some(at) => {
-                ensure!(!at.is_empty(), "Position key must not be empty");
-
-                ensure!(
-                    at.chars().all(|c| c.is_ascii_lowercase()),
-                    "Position key '{at}' must contain only lowercase letters"
-                );
-
-                ensure!(
-                    !at.starts_with('m'),
-                    "Position key '{at}' must not start with 'm'"
-                );
-
                 ensure!(
                     !self.positioned.iter().any(|(p, _)| p == &at),
-                    "Duplicate position key '{at}' for the same file"
+                    "Duplicate position key '{}' for the same file",
+                    at.as_ref()
                 );
                 self.positioned.push((at, content));
             }
@@ -115,7 +135,7 @@ impl FileBlocks {
         let mut all_blocks: Vec<(&str, &str)> = Vec::new();
 
         for (at, content) in &self.positioned {
-            all_blocks.push((at.as_str(), content.as_str()));
+            all_blocks.push((at.as_ref(), content.as_str()));
         }
 
         // Add unpositioned blocks with implicit "m" key
@@ -175,9 +195,19 @@ impl Lit {
         // Extract snippets from top-level code blocks only
         if let Node::Root(root) = ast {
             for child in &root.children {
-                if let Ok(block) = Block::try_from(child) {
-                    let file_blocks = files.entry(block.path).or_default();
-                    file_blocks.add(block.position, block.content)?;
+                // Try to parse as a Block - skip if it's not a tangle block
+                match Block::try_from(child) {
+                    Ok(block) => {
+                        let file_blocks = files.entry(block.path).or_default();
+                        file_blocks.add(block.position, block.content)?;
+                    }
+                    Err(e) => {
+                        // Only propagate errors for tangle blocks with invalid positions
+                        // Skip non-tangle code blocks silently
+                        if e.to_string().contains("Position key") {
+                            return Err(e);
+                        }
+                    }
                 }
             }
         }
@@ -503,7 +533,7 @@ First block
         assert_eq!(blocks.len(), 1);
         let file_blocks = blocks.get(&PathBuf::from("output.txt")).unwrap();
         assert_eq!(file_blocks.positioned.len(), 1);
-        assert_eq!(file_blocks.positioned[0].0, "a");
+        assert_eq!(file_blocks.positioned[0].0.as_ref(), "a");
         assert_eq!(file_blocks.positioned[0].1, "First block");
     }
 
@@ -625,7 +655,10 @@ Duplicate
 
         let block = Block::try_from(&code).unwrap();
         assert_eq!(block.path, PathBuf::from("path/to/file.txt"));
-        assert_eq!(block.position, Some("xyz".to_string()));
+        assert_eq!(
+            block.position.as_ref().map(|p| p.as_ref()),
+            Some("xyz")
+        );
         assert_eq!(block.content, "test content");
     }
 
