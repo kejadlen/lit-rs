@@ -10,3 +10,6 @@ markdown = "*"
 tracing = "*"
 tracing-subscriber = { version = "*", features = ["env-filter"] }
 walkdir = "*"
+
+[dev-dependencies]
+tempfile = "*"
