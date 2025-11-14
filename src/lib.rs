@@ -46,6 +46,7 @@ impl AsRef<str> for Position {
 pub enum PositionError {
     #[error("Position key must not be empty")]
     Empty,
+
     #[error("Position key '{0}' must contain only lowercase letters")]
     InvalidCharacters(String),
 }
@@ -138,46 +139,26 @@ pub enum BlockError {
     PositionError(#[from] PositionError),
 }
 
-/// Represents a tangled file with all its blocks
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TangledFile {
-    /// The destination file path
-    pub path: PathBuf,
-    /// The blocks that belong to this file
-    pub blocks: Vec<Block>,
-}
-
-impl TangledFile {
-    /// Render the content by sorting blocks and concatenating them
-    pub fn render(&mut self) -> String {
-        // Sort blocks by position
-        self.blocks.sort();
-
-        // Concatenate content
-        let content = self
-            .blocks
-            .iter()
-            .map(|b| b.content.as_str())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-
-        format!("{content}\n")
-    }
-}
-
-/// Manages input and output directories for literate programming
-#[derive(Debug)]
-pub struct Lit {
-    /// Input directory path
-    pub input: PathBuf,
-    /// Output directory path
-    pub output: PathBuf,
-}
-
 impl Lit {
-    /// Create a new Lit instance with input and output directories
     pub fn new(input: PathBuf, output: PathBuf) -> Self {
         Lit { input, output }
+    }
+
+    pub fn tangle(&self) -> Result<()> {
+        let files = self.read_blocks()?;
+
+        files.into_iter().try_for_each(|file| -> Result<()> {
+            let content = file.render();
+
+            let full_path = self.output.join(&file.path);
+            if let Some(parent) = full_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            info!("Writing {}", full_path.display());
+            fs::write(&full_path, content)?;
+
+            Ok(())
+        })
     }
 
     /// Parse markdown content and extract code blocks with tangle:// paths
@@ -221,29 +202,36 @@ impl Lit {
 
         Ok(files
             .into_iter()
-            .map(|(path, blocks)| TangledFile { path, blocks })
+            .map(|(path, mut blocks)| {
+                blocks.sort();
+                TangledFile { path, blocks }
+            })
             .collect())
     }
+}
 
-    /// Tangle the code blocks: read from input, parse, and write to output
-    pub fn tangle(&self) -> Result<()> {
-        let files = self.read_blocks()?;
+#[derive(Debug)]
+pub struct Lit {
+    pub input: PathBuf,
+    pub output: PathBuf,
+}
 
-        // Process each file using try_for_each
-        files.into_iter().try_for_each(|mut file| -> Result<()> {
-            // Render the content
-            let content = file.render();
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TangledFile {
+    pub path: PathBuf,
+    pub blocks: Vec<Block>,
+}
 
-            // Write to file
-            let full_path = self.output.join(&file.path);
-            if let Some(parent) = full_path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            info!("Writing {}", full_path.display());
-            fs::write(&full_path, content)?;
+impl TangledFile {
+    pub fn render(&self) -> String {
+        let content = self
+            .blocks
+            .iter()
+            .map(|b| b.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
 
-            Ok(())
-        })
+        format!("{content}\n")
     }
 }
 
@@ -705,6 +693,22 @@ test content
     }
 
     #[test]
+    fn test_empty_position_key_rejected() {
+        let markdown = r#"```tangle:///output.txt?at=
+Empty
+```"#;
+
+        let result = Lit::parse_markdown(markdown);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must not be empty")
+        );
+    }
+
+    #[test]
     fn test_numeric_position_keys_rejected() {
         let markdown = r#"```tangle:///output.txt?at=10
 Ten
@@ -749,22 +753,6 @@ Special
                 .unwrap_err()
                 .to_string()
                 .contains("must contain only lowercase letters")
-        );
-    }
-
-    #[test]
-    fn test_empty_position_key_rejected() {
-        let markdown = r#"```tangle:///output.txt?at=
-Empty
-```"#;
-
-        let result = Lit::parse_markdown(markdown);
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("must not be empty")
         );
     }
 
