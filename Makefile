@@ -18,7 +18,6 @@ lint: tangle
 	cargo check
 	cargo clippy
 
-# Clean generated files and restore src/ from version control
+# Restore src/ from version control
 clean:
 	jj restore src
-	cargo clean

@@ -250,7 +250,6 @@ impl Lit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
     #[test]
     fn test_parse_single_tangle_block() {
@@ -448,6 +447,44 @@ Nested file
 
         let content2 = fs::read_to_string(temp_output.join("subdir/test2.txt"))?;
         assert_eq!(content2, "Nested file\n");
+
+        fs::remove_dir_all(&temp_input)?;
+        fs::remove_dir_all(&temp_output)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_tangled_files_end_with_newline() -> Result<()> {
+        use std::env;
+
+        let temp_input = env::temp_dir().join("lit-test-newline-input");
+        let temp_output = env::temp_dir().join("lit-test-newline-output");
+
+        if temp_input.exists() {
+            fs::remove_dir_all(&temp_input)?;
+        }
+        if temp_output.exists() {
+            fs::remove_dir_all(&temp_output)?;
+        }
+
+        fs::create_dir_all(&temp_input)?;
+        let markdown = r#"# Test
+
+```tangle:///test.txt
+Line 1
+```
+"#;
+        fs::write(temp_input.join("test.md"), markdown)?;
+
+        let lit = Lit::new(temp_input.clone(), temp_output.clone());
+        lit.tangle()?;
+
+        let content = fs::read_to_string(temp_output.join("test.txt"))?;
+        assert!(
+            content.ends_with('\n'),
+            "Tangled file should end with a newline"
+        );
 
         fs::remove_dir_all(&temp_input)?;
         fs::remove_dir_all(&temp_output)?;
@@ -830,43 +867,5 @@ Content
                 .to_string()
                 .contains("must contain only lowercase letters")
         );
-    }
-
-    #[test]
-    fn test_tangled_files_end_with_newline() -> Result<()> {
-        use std::env;
-
-        let temp_input = env::temp_dir().join("lit-test-newline-input");
-        let temp_output = env::temp_dir().join("lit-test-newline-output");
-
-        if temp_input.exists() {
-            fs::remove_dir_all(&temp_input)?;
-        }
-        if temp_output.exists() {
-            fs::remove_dir_all(&temp_output)?;
-        }
-
-        fs::create_dir_all(&temp_input)?;
-        let markdown = r#"# Test
-
-```tangle:///test.txt
-Line 1
-```
-"#;
-        fs::write(temp_input.join("test.md"), markdown)?;
-
-        let lit = Lit::new(temp_input.clone(), temp_output.clone());
-        lit.tangle()?;
-
-        let content = fs::read_to_string(temp_output.join("test.txt"))?;
-        assert!(
-            content.ends_with('\n'),
-            "Tangled file should end with a newline"
-        );
-
-        fs::remove_dir_all(&temp_input)?;
-        fs::remove_dir_all(&temp_output)?;
-
-        Ok(())
     }
 }

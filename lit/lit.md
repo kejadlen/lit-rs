@@ -121,228 +121,9 @@ impl Lit {
 }
 ````
 
-## Tangled Files
+### Tests
 
-`TangledFile` groups blocks destined for the same output file. When rendering, it sorts blocks by position and concatenates them with double newlines.
-
-````tangle:///src/lib.rs?at=e
-/// Represents a tangled file with all its blocks
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TangledFile {
-    /// The destination file path
-    pub path: PathBuf,
-    /// The blocks that belong to this file
-    pub blocks: Vec<Block>,
-}
-
-impl TangledFile {
-    /// Render the content by sorting blocks and concatenating them
-    pub fn render(&mut self) -> String {
-        // Sort blocks by position
-        self.blocks.sort();
-
-        // Concatenate content
-        let content = self
-            .blocks
-            .iter()
-            .map(|b| b.content.as_str())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-
-        format!("{content}\n")
-    }
-}
-````
-
-## Blocks
-
-`Block` represents a single code snippet extracted from markdown:
-- Destination file path
-- Position for ordering (defaults to "m")
-- Code content
-
-Position alone determines block order, enabling fine-grained control over final output even when blocks scatter across multiple markdown files.
-
-### Block Structure
-
-````tangle:///src/lib.rs?at=d
-/// Represents a single tangle block from markdown
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Block {
-    /// The file path to write this block to
-    pub path: PathBuf,
-    /// Position key for ordering (defaults to "m" for unpositioned blocks)
-    pub position: Position,
-    /// The content of the code block
-    pub content: String,
-}
-
-impl PartialOrd for Block {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for Block {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.position.cmp(&other.position)
-    }
-}
-````
-
-### Parsing from Markdown
-
-Converting a markdown AST node into `Block` requires validation:
-1. Verify code block with language tag
-2. Parse language tag as `tangle:///` URL
-3. Validate URL format (must be hostless)
-4. Extract file path and optional position parameter
-
-````tangle:///src/lib.rs?at=d
-impl TryFrom<&Node> for Block {
-    type Error = BlockError;
-
-    fn try_from(node: &Node) -> std::result::Result<Self, Self::Error> {
-        let Node::Code(code) = node else {
-            return Err(BlockError::NotTangleBlock);
-        };
-
-        let lang = code.lang.as_ref().ok_or(BlockError::NotTangleBlock)?;
-
-        // Parse the tangle:/// URL (hostless format)
-        let parsed = Url::parse(lang).map_err(|_| BlockError::NotTangleBlock)?;
-
-        // Check if it's a tangle URL
-        if parsed.scheme() != "tangle" {
-            return Err(BlockError::NotTangleBlock);
-        }
-
-        // Ensure it's hostless (tangle:///path, not tangle://path)
-        if parsed.host_str().is_some() {
-            return Err(BlockError::InvalidTangleUrl);
-        }
-
-        // Get the path from hostless URL (tangle:///path/to/file)
-        let path = parsed.path();
-        if path.is_empty() || path == "/" {
-            return Err(BlockError::MissingPath);
-        }
-        if path.starts_with("//") {
-            return Err(BlockError::InvalidPath);
-        }
-        // Strip the single leading slash to get a relative path
-        let path_str = path.strip_prefix('/').unwrap().to_string();
-
-        // Parse query parameters to extract the "at" parameter
-        let position = parsed
-            .query_pairs()
-            .find(|(key, _)| key == "at")
-            .map(|(_, value)| Position::try_from(value.to_string()))
-            .transpose()?
-            .unwrap_or_else(Position::middle);
-
-        Ok(Block {
-            path: PathBuf::from(path_str),
-            position,
-            content: code.value.clone(),
-        })
-    }
-}
-````
-
-## Position System
-
-Position keys specified via `?at=` control block order. For example, `tangle:///file.txt?at=a` precedes `tangle:///file.txt?at=z`. Blocks without explicit positions default to "m" (middle), allowing positioned blocks before or after.
-
-### Position Type
-
-`Position` wraps a validated string that meets our requirements.
-
-````tangle:///src/lib.rs?at=c
-/// Represents a validated position key for ordering blocks
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Position(String);
-
-impl Position {
-    /// Creates the implicit middle position "m" for unpositioned blocks.
-    pub fn middle() -> Self {
-        Position("m".to_string())
-    }
-}
-
-impl TryFrom<String> for Position {
-    type Error = PositionError;
-
-    fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
-        if value.is_empty() {
-            return Err(PositionError::Empty);
-        }
-
-        if !value.chars().all(|c| c.is_ascii_lowercase()) {
-            return Err(PositionError::InvalidCharacters(value));
-        }
-
-        Ok(Position(value))
-    }
-}
-
-impl AsRef<str> for Position {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-````
-
-## Error Types
-
-Two specialized error types provide clear feedback when operations fail.
-
-### Position Errors
-
-Position keys must be non-empty and contain only lowercase letters. This ensures predictable lexicographic sorting and prevents URL encoding or case sensitivity issues.
-
-````tangle:///src/lib.rs?at=b
-/// Errors that can occur when validating a position key
-#[derive(Debug, Error)]
-pub enum PositionError {
-    #[error("Position key must not be empty")]
-    Empty,
-    #[error("Position key '{0}' must contain only lowercase letters")]
-    InvalidCharacters(String),
-}
-````
-
-### Block Parsing Errors
-
-Parsing tangle blocks from markdown can fail in several ways: malformed URLs, missing required components, or invalid formats.
-
-````tangle:///src/lib.rs?at=b
-/// Errors that can occur when parsing a block from a markdown node
-#[derive(Debug, Error)]
-pub enum BlockError {
-    #[error("Not a tangle block")]
-    NotTangleBlock,
-    #[error("Tangle URL must be hostless (use tangle:///path, not tangle://path)")]
-    InvalidTangleUrl,
-    #[error("Tangle URL missing path")]
-    MissingPath,
-    #[error("Invalid tangle URL path")]
-    InvalidPath,
-    #[error(transparent)]
-    PositionError(#[from] PositionError),
-}
-````
-
-## Tests
-
-Tests validate parsing, positioning, sorting, and end-to-end tangling. They serve as both verification and examples.
-
-```tangle:///src/lib.rs?at=yz
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-```
+Tests verify the parsing, end-to-end tangling, and file writing behavior.
 
 ````tangle:///src/lib.rs?at=z
     #[test]
@@ -548,6 +329,179 @@ Nested file
         Ok(())
     }
 
+    #[test]
+    fn test_tangled_files_end_with_newline() -> Result<()> {
+        use std::env;
+
+        let temp_input = env::temp_dir().join("lit-test-newline-input");
+        let temp_output = env::temp_dir().join("lit-test-newline-output");
+
+        if temp_input.exists() {
+            fs::remove_dir_all(&temp_input)?;
+        }
+        if temp_output.exists() {
+            fs::remove_dir_all(&temp_output)?;
+        }
+
+        fs::create_dir_all(&temp_input)?;
+        let markdown = r#"# Test
+
+```tangle:///test.txt
+Line 1
+```
+"#;
+        fs::write(temp_input.join("test.md"), markdown)?;
+
+        let lit = Lit::new(temp_input.clone(), temp_output.clone());
+        lit.tangle()?;
+
+        let content = fs::read_to_string(temp_output.join("test.txt"))?;
+        assert!(
+            content.ends_with('\n'),
+            "Tangled file should end with a newline"
+        );
+
+        fs::remove_dir_all(&temp_input)?;
+        fs::remove_dir_all(&temp_output)?;
+
+        Ok(())
+    }
+````
+
+## Tangled Files
+
+`TangledFile` groups blocks destined for the same output file. When rendering, it sorts blocks by position and concatenates them with double newlines.
+
+````tangle:///src/lib.rs?at=e
+/// Represents a tangled file with all its blocks
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TangledFile {
+    /// The destination file path
+    pub path: PathBuf,
+    /// The blocks that belong to this file
+    pub blocks: Vec<Block>,
+}
+
+impl TangledFile {
+    /// Render the content by sorting blocks and concatenating them
+    pub fn render(&mut self) -> String {
+        // Sort blocks by position
+        self.blocks.sort();
+
+        // Concatenate content
+        let content = self
+            .blocks
+            .iter()
+            .map(|b| b.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        format!("{content}\n")
+    }
+}
+````
+
+## Blocks
+
+`Block` represents a single code snippet extracted from markdown:
+- Destination file path
+- Position for ordering (defaults to "m")
+- Code content
+
+Position alone determines block order, enabling fine-grained control over final output even when blocks scatter across multiple markdown files.
+
+### Block Structure
+
+````tangle:///src/lib.rs?at=d
+/// Represents a single tangle block from markdown
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Block {
+    /// The file path to write this block to
+    pub path: PathBuf,
+    /// Position key for ordering (defaults to "m" for unpositioned blocks)
+    pub position: Position,
+    /// The content of the code block
+    pub content: String,
+}
+
+impl PartialOrd for Block {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Block {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.position.cmp(&other.position)
+    }
+}
+````
+
+### Parsing from Markdown
+
+Converting a markdown AST node into `Block` requires validation:
+1. Verify code block with language tag
+2. Parse language tag as `tangle:///` URL
+3. Validate URL format (must be hostless)
+4. Extract file path and optional position parameter
+
+````tangle:///src/lib.rs?at=d
+impl TryFrom<&Node> for Block {
+    type Error = BlockError;
+
+    fn try_from(node: &Node) -> std::result::Result<Self, Self::Error> {
+        let Node::Code(code) = node else {
+            return Err(BlockError::NotTangleBlock);
+        };
+
+        let lang = code.lang.as_ref().ok_or(BlockError::NotTangleBlock)?;
+
+        // Parse the tangle:/// URL (hostless format)
+        let parsed = Url::parse(lang).map_err(|_| BlockError::NotTangleBlock)?;
+
+        // Check if it's a tangle URL
+        if parsed.scheme() != "tangle" {
+            return Err(BlockError::NotTangleBlock);
+        }
+
+        // Ensure it's hostless (tangle:///path, not tangle://path)
+        if parsed.host_str().is_some() {
+            return Err(BlockError::InvalidTangleUrl);
+        }
+
+        // Get the path from hostless URL (tangle:///path/to/file)
+        let path = parsed.path();
+        if path.is_empty() || path == "/" {
+            return Err(BlockError::MissingPath);
+        }
+        if path.starts_with("//") {
+            return Err(BlockError::InvalidPath);
+        }
+        // Strip the single leading slash to get a relative path
+        let path_str = path.strip_prefix('/').unwrap().to_string();
+
+        // Parse query parameters to extract the "at" parameter
+        let position = parsed
+            .query_pairs()
+            .find(|(key, _)| key == "at")
+            .map(|(_, value)| Position::try_from(value.to_string()))
+            .transpose()?
+            .unwrap_or_else(Position::middle);
+
+        Ok(Block {
+            path: PathBuf::from(path_str),
+            position,
+            content: code.value.clone(),
+        })
+    }
+}
+````
+
+### Tests
+
+Tests verify Block parsing, validation, and sorting behavior.
+
+````tangle:///src/lib.rs?at=z
     #[test]
     fn test_parse_block_with_at() {
         let markdown = r#"```tangle:///output.txt?at=a
@@ -759,7 +713,56 @@ test content
                 .contains("Invalid tangle URL path")
         );
     }
+````
 
+## Position System
+
+Position keys specified via `?at=` control block order. For example, `tangle:///file.txt?at=a` precedes `tangle:///file.txt?at=z`. Blocks without explicit positions default to "m" (middle), allowing positioned blocks before or after.
+
+### Position Type
+
+`Position` wraps a validated string that meets our requirements.
+
+````tangle:///src/lib.rs?at=c
+/// Represents a validated position key for ordering blocks
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Position(String);
+
+impl Position {
+    /// Creates the implicit middle position "m" for unpositioned blocks.
+    pub fn middle() -> Self {
+        Position("m".to_string())
+    }
+}
+
+impl TryFrom<String> for Position {
+    type Error = PositionError;
+
+    fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
+        if value.is_empty() {
+            return Err(PositionError::Empty);
+        }
+
+        if !value.chars().all(|c| c.is_ascii_lowercase()) {
+            return Err(PositionError::InvalidCharacters(value));
+        }
+
+        Ok(Position(value))
+    }
+}
+
+impl AsRef<str> for Position {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+````
+
+### Tests
+
+Tests verify Position validation rules.
+
+````tangle:///src/lib.rs?at=z
     #[test]
     fn test_numeric_position_keys_rejected() {
         let markdown = r#"```tangle:///output.txt?at=10
@@ -924,45 +927,53 @@ Content
                 .contains("must contain only lowercase letters")
         );
     }
-
-    #[test]
-    fn test_tangled_files_end_with_newline() -> Result<()> {
-        use std::env;
-
-        let temp_input = env::temp_dir().join("lit-test-newline-input");
-        let temp_output = env::temp_dir().join("lit-test-newline-output");
-
-        if temp_input.exists() {
-            fs::remove_dir_all(&temp_input)?;
-        }
-        if temp_output.exists() {
-            fs::remove_dir_all(&temp_output)?;
-        }
-
-        fs::create_dir_all(&temp_input)?;
-        let markdown = r#"# Test
-
-```tangle:///test.txt
-Line 1
-```
-"#;
-        fs::write(temp_input.join("test.md"), markdown)?;
-
-        let lit = Lit::new(temp_input.clone(), temp_output.clone());
-        lit.tangle()?;
-
-        let content = fs::read_to_string(temp_output.join("test.txt"))?;
-        assert!(
-            content.ends_with('\n'),
-            "Tangled file should end with a newline"
-        );
-
-        fs::remove_dir_all(&temp_input)?;
-        fs::remove_dir_all(&temp_output)?;
-
-        Ok(())
-    }
 ````
+
+## Error Types
+
+Two specialized error types provide clear feedback when operations fail.
+
+### Position Errors
+
+Position keys must be non-empty and contain only lowercase letters. This ensures predictable lexicographic sorting and prevents URL encoding or case sensitivity issues.
+
+````tangle:///src/lib.rs?at=b
+/// Errors that can occur when validating a position key
+#[derive(Debug, Error)]
+pub enum PositionError {
+    #[error("Position key must not be empty")]
+    Empty,
+    #[error("Position key '{0}' must contain only lowercase letters")]
+    InvalidCharacters(String),
+}
+````
+
+### Block Parsing Errors
+
+Parsing tangle blocks from markdown can fail in several ways: malformed URLs, missing required components, or invalid formats.
+
+````tangle:///src/lib.rs?at=b
+/// Errors that can occur when parsing a block from a markdown node
+#[derive(Debug, Error)]
+pub enum BlockError {
+    #[error("Not a tangle block")]
+    NotTangleBlock,
+    #[error("Tangle URL must be hostless (use tangle:///path, not tangle://path)")]
+    InvalidTangleUrl,
+    #[error("Tangle URL missing path")]
+    MissingPath,
+    #[error("Invalid tangle URL path")]
+    InvalidPath,
+    #[error(transparent)]
+    PositionError(#[from] PositionError),
+}
+````
+
+```tangle:///src/lib.rs?at=yz
+#[cfg(test)]
+mod tests {
+    use super::*;
+```
 
 ```tangle:///src/lib.rs?at=zz
 }
