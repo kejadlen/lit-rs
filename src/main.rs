@@ -1,5 +1,5 @@
 use clap::Parser;
-use color_eyre::{Result, eyre::eyre};
+use color_eyre::{eyre::ensure, Result};
 use markdown::{ParseOptions, to_mdast};
 use std::collections::HashMap;
 use std::fs;
@@ -20,26 +20,24 @@ impl FileBlocks {
     /// or if it contains non-lowercase characters
     fn add_positioned(&mut self, at: String, content: String) -> Result<()> {
         // Validate that position key is not empty
-        if at.is_empty() {
-            return Err(eyre!("Position key must not be empty"));
-        }
+        ensure!(!at.is_empty(), "Position key must not be empty");
 
         // Validate that position key only contains lowercase letters
-        if !at.chars().all(|c| c.is_ascii_lowercase()) {
-            return Err(eyre!(
-                "Position key '{}' must contain only lowercase letters",
-                at
-            ));
-        }
+        ensure!(
+            at.chars().all(|c| c.is_ascii_lowercase()),
+            "Position key '{at}' must contain only lowercase letters"
+        );
 
         // Disallow position keys starting with 'm'
-        if at.starts_with('m') {
-            return Err(eyre!("Position key '{}' must not start with 'm'", at));
-        }
+        ensure!(
+            !at.starts_with('m'),
+            "Position key '{at}' must not start with 'm'"
+        );
 
-        if self.positioned.iter().any(|(p, _)| p == &at) {
-            return Err(eyre!("Duplicate position key '{}' for the same file", at));
-        }
+        ensure!(
+            !self.positioned.iter().any(|(p, _)| p == &at),
+            "Duplicate position key '{at}' for the same file"
+        );
         self.positioned.push((at, content));
         Ok(())
     }
