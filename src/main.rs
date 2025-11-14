@@ -32,8 +32,8 @@ enum BlockError {
     InvalidTangleUrl,
     #[error("Tangle URL missing path")]
     MissingPath,
-    #[error("Tangle URL path must be relative, not absolute")]
-    AbsolutePath,
+    #[error("Tangle URL path must not start with //")]
+    PathStartsWithDoubleSlash,
     #[error(transparent)]
     PositionError(#[from] PositionError),
 }
@@ -108,7 +108,7 @@ impl TryFrom<&Node> for Block {
             return Err(BlockError::MissingPath);
         }
         if path.starts_with("//") {
-            return Err(BlockError::AbsolutePath);
+            return Err(BlockError::PathStartsWithDoubleSlash);
         }
         let path_str = path.trim_start_matches('/').to_string();
 
@@ -241,9 +241,9 @@ impl Lit {
                         // Propagate missing path errors for tangle blocks
                         bail!(BlockError::MissingPath);
                     }
-                    Err(BlockError::AbsolutePath) => {
-                        // Propagate absolute path errors for tangle blocks
-                        bail!(BlockError::AbsolutePath);
+                    Err(BlockError::PathStartsWithDoubleSlash) => {
+                        // Propagate double slash path errors for tangle blocks
+                        bail!(BlockError::PathStartsWithDoubleSlash);
                     }
                     Err(_) => {
                         // Skip non-tangle code blocks silently
@@ -747,7 +747,7 @@ test content
     }
 
     #[test]
-    fn test_block_with_absolute_path_rejected() {
+    fn test_block_with_double_slash_path_rejected() {
         let markdown = r#"```tangle:////absolute/path.txt
 test content
 ```"#;
@@ -758,7 +758,7 @@ test content
             result
                 .unwrap_err()
                 .to_string()
-                .contains("must be relative")
+                .contains("must not start with //")
         );
     }
 
