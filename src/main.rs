@@ -229,24 +229,12 @@ impl Lit {
                         let file_blocks = files.entry(block.path).or_default();
                         file_blocks.add(block.position, block.content)?;
                     }
-                    Err(BlockError::PositionError(e)) => {
-                        // Propagate position errors for tangle blocks
-                        bail!(e);
-                    }
-                    Err(BlockError::InvalidTangleUrl) => {
-                        // Propagate invalid tangle URL errors (user tried tangle:// instead of tangle:///)
-                        bail!(BlockError::InvalidTangleUrl);
-                    }
-                    Err(BlockError::MissingPath) => {
-                        // Propagate missing path errors for tangle blocks
-                        bail!(BlockError::MissingPath);
-                    }
-                    Err(BlockError::InvalidPath) => {
-                        // Propagate invalid path errors for tangle blocks
-                        bail!(BlockError::InvalidPath);
-                    }
-                    Err(_) => {
+                    Err(BlockError::NotCodeNode | BlockError::NotTangleBlock) => {
                         // Skip non-tangle code blocks silently
+                    }
+                    Err(e) => {
+                        // Propagate all other errors (invalid tangle URLs, bad paths, etc.)
+                        bail!(e);
                     }
                 }
             }
