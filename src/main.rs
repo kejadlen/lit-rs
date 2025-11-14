@@ -85,34 +85,28 @@ impl TryFrom<&Node> for Block {
             return Err(BlockError::NotCodeNode);
         };
 
-        let Some(lang) = &code.lang else {
-            return Err(BlockError::NotTangleBlock);
-        };
+        let lang = code.lang.as_ref().ok_or(BlockError::NotTangleBlock)?;
 
         // Parse the tangle:/// URL (hostless format)
-        let Ok(parsed) = Url::parse(lang) else {
-            return Err(BlockError::NotTangleBlock);
-        };
+        let parsed = Url::parse(lang).map_err(|_| BlockError::NotTangleBlock)?;
 
         // Check if it's a tangle URL
-        if parsed.scheme() != "tangle" {
-            return Err(BlockError::NotTangleBlock);
-        }
+        (parsed.scheme() == "tangle")
+            .then_some(())
+            .ok_or(BlockError::NotTangleBlock)?;
 
         // Ensure it's hostless (tangle:///path, not tangle://path)
-        if parsed.host_str().is_some() {
-            return Err(BlockError::InvalidTangleUrl);
-        }
+        parsed
+            .host_str()
+            .is_none()
+            .then_some(())
+            .ok_or(BlockError::InvalidTangleUrl)?;
 
         // Get the path from hostless URL (tangle:///path/to/file)
-        let path_str = {
-            let path = parsed.path();
-            if path.is_empty() || path == "/" {
-                return Err(BlockError::MissingPath);
-            }
-            // Remove leading slash for file path
-            path.trim_start_matches('/').to_string()
-        };
+        let path = parsed.path();
+        let path_str = (!path.is_empty() && path != "/")
+            .then(|| path.trim_start_matches('/').to_string())
+            .ok_or(BlockError::MissingPath)?;
 
         // Parse query parameters to extract the "at" parameter
         let position = parsed
