@@ -1,6 +1,7 @@
 use clap::Parser;
 use color_eyre::Result;
 use markdown::{to_mdast, ParseOptions};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use walkdir::WalkDir;
@@ -14,49 +15,84 @@ struct Args {
     directory: PathBuf,
 }
 
-/// Represents a code snippet with a tangle path
-#[derive(Debug, Clone, PartialEq)]
-struct Snippet {
-    /// The file path where this code should be written
-    path: PathBuf,
-    /// The code content
-    content: String,
+/// Manages tangle blocks grouped by file path
+#[derive(Debug)]
+struct Loom {
+    /// Map from file path to list of content snippets for that file
+    files: HashMap<PathBuf, Vec<String>>,
 }
 
-/// Parse a markdown file and extract all tangle code blocks
-fn parse_markdown_file(path: &PathBuf) -> Result<Vec<Snippet>> {
-    let content = fs::read_to_string(path)?;
-    Ok(parse_tangle_blocks(&content))
-}
+impl Loom {
+    /// Parse markdown content and extract code blocks with tangle:// paths
+    fn from_markdown(markdown_text: &str) -> Self {
+        use markdown::mdast::Node;
 
-/// Parse markdown content and extract code blocks with tangle:// paths
-fn parse_tangle_blocks(markdown_text: &str) -> Vec<Snippet> {
-    use markdown::mdast::Node;
+        // Parse markdown to AST
+        let ast = match to_mdast(markdown_text, &ParseOptions::default()) {
+            Ok(ast) => ast,
+            Err(_) => return Loom { files: HashMap::new() },
+        };
 
-    // Parse markdown to AST
-    let ast = match to_mdast(markdown_text, &ParseOptions::default()) {
-        Ok(ast) => ast,
-        Err(_) => return Vec::new(),
-    };
+        let mut files: HashMap<PathBuf, Vec<String>> = HashMap::new();
 
-    // Extract snippets from top-level code blocks only
-    let mut snippets = Vec::new();
-    if let Node::Root(root) = ast {
-        for child in &root.children {
-            if let Node::Code(code) = child {
-                if let Some(lang) = &code.lang {
-                    if let Some(path_str) = lang.strip_prefix("tangle://") {
-                        snippets.push(Snippet {
-                            path: PathBuf::from(path_str),
-                            content: code.value.clone(),
-                        });
+        // Extract snippets from top-level code blocks only
+        if let Node::Root(root) = ast {
+            for child in &root.children {
+                if let Node::Code(code) = child {
+                    if let Some(lang) = &code.lang {
+                        if let Some(path_str) = lang.strip_prefix("tangle://") {
+                            files
+                                .entry(PathBuf::from(path_str))
+                                .or_insert_with(Vec::new)
+                                .push(code.value.clone());
+                        }
                     }
                 }
             }
         }
+
+        Loom { files }
     }
 
-    snippets
+    /// Walk a directory and parse all markdown files, collecting tangle blocks
+    fn from_directory(directory: &PathBuf) -> Result<Self> {
+        let mut files: HashMap<PathBuf, Vec<String>> = HashMap::new();
+
+        for entry in WalkDir::new(directory).into_iter().filter_map(|e| e.ok()) {
+            if entry.file_type().is_file() {
+                if let Some(ext) = entry.path().extension() {
+                    if ext == "md" {
+                        let content = fs::read_to_string(entry.path())?;
+                        let loom = Loom::from_markdown(&content);
+
+                        // Merge the parsed loom into our files HashMap
+                        for (path, contents) in loom.files {
+                            files.entry(path).or_insert_with(Vec::new).extend(contents);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(Loom { files })
+    }
+
+    /// Create an iterator over all snippets as (path, content) tuples
+    fn iter(&self) -> impl Iterator<Item = (&PathBuf, &str)> + '_ {
+        self.files.iter().flat_map(|(path, contents)| {
+            contents.iter().map(move |content| (path, content.as_str()))
+        })
+    }
+
+    /// Get the total number of snippets across all files
+    fn len(&self) -> usize {
+        self.files.values().map(|v| v.len()).sum()
+    }
+
+    /// Check if there are no snippets
+    fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
 }
 
 fn main() -> Result<()> {
@@ -67,35 +103,15 @@ fn main() -> Result<()> {
 
     println!("Processing markdown files in {}:\n", args.directory.display());
 
-    for entry in WalkDir::new(&args.directory)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        if entry.file_type().is_file() {
-            if let Some(ext) = entry.path().extension() {
-                if ext == "md" {
-                    let path = entry.path().to_path_buf();
-                    println!("File: {}", path.display());
+    let loom = Loom::from_directory(&args.directory)?;
 
-                    match parse_markdown_file(&path) {
-                        Ok(snippets) => {
-                            if snippets.is_empty() {
-                                println!("  No tangle blocks found");
-                            } else {
-                                println!("  Found {} tangle block(s):", snippets.len());
-                                for snippet in snippets {
-                                    println!("    → {}", snippet.path.display());
-                                    println!("      {} lines", snippet.content.lines().count());
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("  Error parsing file: {}", e);
-                        }
-                    }
-                    println!();
-                }
-            }
+    if loom.is_empty() {
+        println!("No tangle blocks found");
+    } else {
+        println!("Found {} tangle block(s) across all files:\n", loom.len());
+        for (path, content) in loom.iter() {
+            println!("  → {}", path.display());
+            println!("    {} lines", content.lines().count());
         }
     }
 
@@ -117,10 +133,12 @@ fn main() {
 ```
 "#;
 
-        let snippets = parse_tangle_blocks(markdown);
-        assert_eq!(snippets.len(), 1);
-        assert_eq!(snippets[0].path, PathBuf::from("src/main.rs"));
-        assert_eq!(snippets[0].content, "fn main() {\n    println!(\"Hello\");\n}");
+        let loom = Loom::from_markdown(markdown);
+        assert_eq!(loom.len(), 1);
+
+        let snippets: Vec<_> = loom.iter().collect();
+        assert_eq!(snippets[0].0, &PathBuf::from("src/main.rs"));
+        assert_eq!(snippets[0].1, "fn main() {\n    println!(\"Hello\");\n}");
     }
 
     #[test]
@@ -138,12 +156,13 @@ code 2
 ```
 "#;
 
-        let snippets = parse_tangle_blocks(markdown);
-        assert_eq!(snippets.len(), 2);
-        assert_eq!(snippets[0].path, PathBuf::from("file1.rs"));
-        assert_eq!(snippets[0].content, "code 1");
-        assert_eq!(snippets[1].path, PathBuf::from("file2.rs"));
-        assert_eq!(snippets[1].content, "code 2");
+        let loom = Loom::from_markdown(markdown);
+        assert_eq!(loom.len(), 2);
+
+        let snippets: Vec<_> = loom.iter().collect();
+        // HashMap doesn't guarantee order, so check both snippets exist
+        assert!(snippets.iter().any(|(path, content)| path == &&PathBuf::from("file1.rs") && *content == "code 1"));
+        assert!(snippets.iter().any(|(path, content)| path == &&PathBuf::from("file2.rs") && *content == "code 2"));
     }
 
     #[test]
@@ -161,10 +180,12 @@ let y = 10;
 ```
 "#;
 
-        let snippets = parse_tangle_blocks(markdown);
-        assert_eq!(snippets.len(), 1);
-        assert_eq!(snippets[0].path, PathBuf::from("output.rs"));
-        assert_eq!(snippets[0].content, "// This should be extracted\nlet y = 10;");
+        let loom = Loom::from_markdown(markdown);
+        assert_eq!(loom.len(), 1);
+
+        let snippets: Vec<_> = loom.iter().collect();
+        assert_eq!(snippets[0].0, &PathBuf::from("output.rs"));
+        assert_eq!(snippets[0].1, "// This should be extracted\nlet y = 10;");
     }
 
     #[test]
@@ -182,10 +203,12 @@ Top level content
 > ```
 "#;
 
-        let snippets = parse_tangle_blocks(markdown);
-        assert_eq!(snippets.len(), 1);
-        assert_eq!(snippets[0].path, PathBuf::from("top-level.txt"));
-        assert_eq!(snippets[0].content, "Top level content");
+        let loom = Loom::from_markdown(markdown);
+        assert_eq!(loom.len(), 1);
+
+        let snippets: Vec<_> = loom.iter().collect();
+        assert_eq!(snippets[0].0, &PathBuf::from("top-level.txt"));
+        assert_eq!(snippets[0].1, "Top level content");
     }
 
     #[test]
@@ -204,17 +227,19 @@ Top level content
   ```
 "#;
 
-        let snippets = parse_tangle_blocks(markdown);
-        assert_eq!(snippets.len(), 1);
-        assert_eq!(snippets[0].path, PathBuf::from("top-level.txt"));
-        assert_eq!(snippets[0].content, "Top level content");
+        let loom = Loom::from_markdown(markdown);
+        assert_eq!(loom.len(), 1);
+
+        let snippets: Vec<_> = loom.iter().collect();
+        assert_eq!(snippets[0].0, &PathBuf::from("top-level.txt"));
+        assert_eq!(snippets[0].1, "Top level content");
     }
 
     #[test]
     fn test_empty_markdown() {
         let markdown = "";
-        let snippets = parse_tangle_blocks(markdown);
-        assert_eq!(snippets.len(), 0);
+        let loom = Loom::from_markdown(markdown);
+        assert_eq!(loom.len(), 0);
     }
 
     #[test]
@@ -230,8 +255,8 @@ Regular code block
 More text.
 "#;
 
-        let snippets = parse_tangle_blocks(markdown);
-        assert_eq!(snippets.len(), 0);
+        let loom = Loom::from_markdown(markdown);
+        assert_eq!(loom.len(), 0);
     }
 
     #[test]
@@ -240,10 +265,12 @@ More text.
 pub fn helper() {}
 ```"#;
 
-        let snippets = parse_tangle_blocks(markdown);
-        assert_eq!(snippets.len(), 1);
-        assert_eq!(snippets[0].path, PathBuf::from("src/modules/utils.rs"));
-        assert_eq!(snippets[0].content, "pub fn helper() {}");
+        let loom = Loom::from_markdown(markdown);
+        assert_eq!(loom.len(), 1);
+
+        let snippets: Vec<_> = loom.iter().collect();
+        assert_eq!(snippets[0].0, &PathBuf::from("src/modules/utils.rs"));
+        assert_eq!(snippets[0].1, "pub fn helper() {}");
     }
 
     #[test]
@@ -251,9 +278,11 @@ pub fn helper() {}
         let markdown = r#"```tangle://empty.txt
 ```"#;
 
-        let snippets = parse_tangle_blocks(markdown);
-        assert_eq!(snippets.len(), 1);
-        assert_eq!(snippets[0].path, PathBuf::from("empty.txt"));
-        assert_eq!(snippets[0].content, "");
+        let loom = Loom::from_markdown(markdown);
+        assert_eq!(loom.len(), 1);
+
+        let snippets: Vec<_> = loom.iter().collect();
+        assert_eq!(snippets[0].0, &PathBuf::from("empty.txt"));
+        assert_eq!(snippets[0].1, "");
     }
 }
