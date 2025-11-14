@@ -14,7 +14,7 @@ This is a simple example demonstrating literate programming.
 
 ## Main Program
 
-```tangle://main.rs
+```tangle:///main.rs
 fn main() {
     println!("Hello, World!");
 }
@@ -22,25 +22,25 @@ fn main() {
 
 ## Configuration
 
-```tangle://config.toml
+```tangle:///config.toml
 name = "example"
 version = "1.0.0"
 ```
 
 ## Multiple blocks for same file
 
-```tangle://lib.rs?at=z
+```tangle:///lib.rs?at=z
 // Footer comment
 ```
 
-```tangle://lib.rs
+```tangle:///lib.rs
 // Main content
 pub fn greet() {
     println!("Hello!");
 }
 ```
 
-```tangle://lib.rs?at=a
+```tangle:///lib.rs?at=a
 // Header comment
 ```
 "#;
