@@ -38,6 +38,13 @@ enum BlockError {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct Position(String);
 
+impl Position {
+    /// Creates the implicit middle position "m" for unpositioned blocks.
+    fn middle() -> Self {
+        Position("m".to_string())
+    }
+}
+
 impl TryFrom<String> for Position {
     type Error = PositionError;
 
@@ -65,8 +72,8 @@ impl AsRef<str> for Position {
 struct Block {
     /// The file path to write this block to
     path: PathBuf,
-    /// Optional position key for ordering
-    position: Option<Position>,
+    /// Position key for ordering (defaults to "m" for unpositioned blocks)
+    position: Position,
     /// The content of the code block
     content: String,
 }
@@ -110,7 +117,8 @@ impl TryFrom<&Node> for Block {
             .query_pairs()
             .find(|(key, _)| key == "at")
             .map(|(_, value)| Position::try_from(value.to_string()))
-            .transpose()?;
+            .transpose()?
+            .unwrap_or_else(Position::middle);
 
         Ok(Block {
             path: PathBuf::from(path_str),
@@ -209,12 +217,8 @@ impl Lit {
         files
             .into_iter()
             .try_for_each(|(path, mut blocks)| -> Result<()> {
-                // Sort blocks by position (None -> "m")
-                blocks.sort_by(|a, b| {
-                    let a_key = a.position.as_ref().map(|p| p.as_ref()).unwrap_or("m");
-                    let b_key = b.position.as_ref().map(|p| p.as_ref()).unwrap_or("m");
-                    a_key.cmp(b_key)
-                });
+                // Sort blocks by position
+                blocks.sort_by(|a, b| a.position.cmp(&b.position));
 
                 // Concatenate content
                 let content = blocks
@@ -278,8 +282,11 @@ fn main() {
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].path, PathBuf::from("src/main.rs"));
-        assert_eq!(blocks[0].position, None);
-        assert_eq!(blocks[0].content, "fn main() {\n    println!(\"Hello\");\n}");
+        assert_eq!(blocks[0].position, Position::middle());
+        assert_eq!(
+            blocks[0].content,
+            "fn main() {\n    println!(\"Hello\");\n}"
+        );
     }
 
     #[test]
@@ -323,7 +330,10 @@ let y = 10;
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].path, PathBuf::from("output.rs"));
-        assert_eq!(blocks[0].content, "// This should be extracted\nlet y = 10;");
+        assert_eq!(
+            blocks[0].content,
+            "// This should be extracted\nlet y = 10;"
+        );
     }
 
     #[test]
@@ -470,7 +480,7 @@ First block
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].path, PathBuf::from("output.txt"));
-        assert_eq!(blocks[0].position.as_ref().map(|p| p.as_ref()), Some("a"));
+        assert_eq!(blocks[0].position.as_ref(), "a");
         assert_eq!(blocks[0].content, "First block");
     }
 
@@ -491,7 +501,7 @@ Second block
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 3);
         assert!(blocks.iter().all(|b| b.path == PathBuf::from("output.txt")));
-        assert!(blocks.iter().all(|b| b.position.is_some()));
+        assert!(blocks.iter().all(|b| b.position.as_ref() != "m"));
     }
 
     #[test]
@@ -509,11 +519,7 @@ Second
 ```"#;
 
         let mut blocks = Lit::parse_markdown(markdown).unwrap();
-        blocks.sort_by(|a, b| {
-            let a_key = a.position.as_ref().map(|p| p.as_ref()).unwrap_or("m");
-            let b_key = b.position.as_ref().map(|p| p.as_ref()).unwrap_or("m");
-            a_key.cmp(b_key)
-        });
+        blocks.sort_by(|a, b| a.position.cmp(&b.position));
         let content = blocks
             .iter()
             .map(|b| b.content.as_str())
@@ -542,11 +548,7 @@ Unpositioned 2
 ```"#;
 
         let mut blocks = Lit::parse_markdown(markdown).unwrap();
-        blocks.sort_by(|a, b| {
-            let a_key = a.position.as_ref().map(|p| p.as_ref()).unwrap_or("m");
-            let b_key = b.position.as_ref().map(|p| p.as_ref()).unwrap_or("m");
-            a_key.cmp(b_key)
-        });
+        blocks.sort_by(|a, b| a.position.cmp(&b.position));
         let content = blocks
             .iter()
             .map(|b| b.content.as_str())
@@ -573,17 +575,13 @@ Duplicate
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].path, PathBuf::from("output.txt"));
-        assert_eq!(blocks[0].position.as_ref().map(|p| p.as_ref()), Some("a"));
+        assert_eq!(blocks[0].position.as_ref(), "a");
         assert_eq!(blocks[1].path, PathBuf::from("output.txt"));
-        assert_eq!(blocks[1].position.as_ref().map(|p| p.as_ref()), Some("a"));
+        assert_eq!(blocks[1].position.as_ref(), "a");
 
         // Sort and concatenate like tangle does
         let mut blocks = blocks;
-        blocks.sort_by(|a, b| {
-            let a_key = a.position.as_ref().map(|p| p.as_ref()).unwrap_or("m");
-            let b_key = b.position.as_ref().map(|p| p.as_ref()).unwrap_or("m");
-            a_key.cmp(b_key)
-        });
+        blocks.sort_by(|a, b| a.position.cmp(&b.position));
         let content = blocks
             .iter()
             .map(|b| b.content.as_str())
@@ -606,7 +604,7 @@ Duplicate
 
         let block = Block::try_from(&code).unwrap();
         assert_eq!(block.path, PathBuf::from("path/to/file.txt"));
-        assert_eq!(block.position, None);
+        assert_eq!(block.position, Position::middle());
         assert_eq!(block.content, "test content");
     }
 
@@ -623,7 +621,7 @@ Duplicate
 
         let block = Block::try_from(&code).unwrap();
         assert_eq!(block.path, PathBuf::from("path/to/file.txt"));
-        assert_eq!(block.position.as_ref().map(|p| p.as_ref()), Some("xyz"));
+        assert_eq!(block.position.as_ref(), "xyz");
         assert_eq!(block.content, "test content");
     }
 
@@ -640,7 +638,7 @@ Duplicate
 
         let block = Block::try_from(&code).unwrap();
         assert_eq!(block.path, PathBuf::from("path/to/file.txt"));
-        assert_eq!(block.position, None);
+        assert_eq!(block.position, Position::middle());
     }
 
     #[test]
@@ -666,12 +664,7 @@ test content
 
         let result = Lit::parse_markdown(markdown);
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("must be hostless")
-        );
+        assert!(result.unwrap_err().to_string().contains("must be hostless"));
     }
 
     #[test]
@@ -763,7 +756,7 @@ Content
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].path, PathBuf::from("output.txt"));
-        assert_eq!(blocks[0].position.as_ref().map(|p| p.as_ref()), Some("main"));
+        assert_eq!(blocks[0].position.as_ref(), "main");
         assert_eq!(blocks[0].content, "Content");
     }
 
@@ -792,7 +785,7 @@ Content
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].path, PathBuf::from("output.txt"));
-        assert_eq!(blocks[0].position.as_ref().map(|p| p.as_ref()), Some("m"));
+        assert_eq!(blocks[0].position.as_ref(), "m");
         assert_eq!(blocks[0].content, "Content");
     }
 
@@ -812,11 +805,7 @@ Third
 
         let mut blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 3);
-        blocks.sort_by(|a, b| {
-            let a_key = a.position.as_ref().map(|p| p.as_ref()).unwrap_or("m");
-            let b_key = b.position.as_ref().map(|p| p.as_ref()).unwrap_or("m");
-            a_key.cmp(b_key)
-        });
+        blocks.sort_by(|a, b| a.position.cmp(&b.position));
         let content = blocks
             .iter()
             .map(|b| b.content.as_str())
