@@ -37,18 +37,22 @@ impl Loom {
 
         // Extract snippets from top-level code blocks only
         if let Node::Root(root) = ast {
-            for child in &root.children {
-                if let Node::Code(code) = child {
-                    if let Some(lang) = &code.lang {
-                        if let Some(path_str) = lang.strip_prefix("tangle://") {
-                            files
-                                .entry(PathBuf::from(path_str))
-                                .or_insert_with(Vec::new)
-                                .push(code.value.clone());
-                        }
-                    }
-                }
-            }
+            root.children.iter()
+                .filter_map(|child| match child {
+                    Node::Code(code) => Some(code),
+                    _ => None,
+                })
+                .filter_map(|code| {
+                    code.lang.as_ref()
+                        .and_then(|lang| lang.strip_prefix("tangle://"))
+                        .map(|path_str| (path_str, &code.value))
+                })
+                .for_each(|(path_str, value)| {
+                    files
+                        .entry(PathBuf::from(path_str))
+                        .or_insert_with(Vec::new)
+                        .push(value.clone());
+                });
         }
 
         Loom { files }
@@ -58,21 +62,24 @@ impl Loom {
     fn from_directory(directory: &PathBuf) -> Result<Self> {
         let mut files: HashMap<PathBuf, Vec<String>> = HashMap::new();
 
-        for entry in WalkDir::new(directory).into_iter().filter_map(|e| e.ok()) {
-            if entry.file_type().is_file() {
-                if let Some(ext) = entry.path().extension() {
-                    if ext == "md" {
-                        let content = fs::read_to_string(entry.path())?;
-                        let loom = Loom::from_markdown(&content);
+        WalkDir::new(directory)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|entry| entry.file_type().is_file())
+            .filter(|entry| {
+                entry.path().extension()
+                    .map_or(false, |ext| ext == "md")
+            })
+            .try_for_each(|entry| -> Result<()> {
+                let content = fs::read_to_string(entry.path())?;
+                let loom = Loom::from_markdown(&content);
 
-                        // Merge the parsed loom into our files HashMap
-                        for (path, contents) in loom.files {
-                            files.entry(path).or_insert_with(Vec::new).extend(contents);
-                        }
-                    }
+                // Merge the parsed loom into our files HashMap
+                for (path, contents) in loom.files {
+                    files.entry(path).or_insert_with(Vec::new).extend(contents);
                 }
-            }
-        }
+                Ok(())
+            })?;
 
         Ok(Loom { files })
     }
