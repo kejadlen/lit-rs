@@ -19,7 +19,6 @@ echo "Hello, World!"
 We can also add a function to greet people by name:
 
 ```tangle://hello.sh
-
 greet() {
     local name="$1"
     echo "Hello, $name!"
@@ -94,7 +93,7 @@ The resulting `program.txt` will be ordered as:
 
 ### Position Key Rules
 
-- Position keys must contain only alphabetic letters (a-z, A-Z)
-- Position keys cannot start with 'm' or 'M' (reserved for unpositioned blocks)
+- Position keys must contain only lowercase letters (a-z)
+- Position keys cannot start with 'm' (reserved for unpositioned blocks)
 - Position keys must be unique within the same file
-- Sorting is lexicographic (case-sensitive): "A" < "B" < "a" < "b"
+- Sorting is lexicographic: "a" < "b" < "c" etc.

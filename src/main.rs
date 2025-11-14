@@ -17,27 +17,24 @@ struct FileBlocks {
 
 impl FileBlocks {
     /// Add a positioned block, returning an error if the position key is not unique
-    /// or if it contains non-alphabetic characters
+    /// or if it contains non-lowercase characters
     fn add_positioned(&mut self, at: String, content: String) -> Result<()> {
         // Validate that position key is not empty
         if at.is_empty() {
             return Err(eyre!("Position key must not be empty"));
         }
 
-        // Validate that position key only contains alphabetic characters
-        if !at.chars().all(|c| c.is_alphabetic()) {
+        // Validate that position key only contains lowercase letters
+        if !at.chars().all(|c| c.is_ascii_lowercase()) {
             return Err(eyre!(
-                "Position key '{}' must contain only alphabetic letters",
+                "Position key '{}' must contain only lowercase letters",
                 at
             ));
         }
 
-        // Disallow position keys starting with 'm' or 'M'
-        if at.starts_with('m') || at.starts_with('M') {
-            return Err(eyre!(
-                "Position key '{}' must not start with 'm' or 'M'",
-                at
-            ));
+        // Disallow position keys starting with 'm'
+        if at.starts_with('m') {
+            return Err(eyre!("Position key '{}' must not start with 'm'", at));
         }
 
         if self.positioned.iter().any(|(p, _)| p == &at) {
@@ -71,12 +68,14 @@ impl FileBlocks {
         // Sort by position key lexicographically
         all_blocks.sort_by(|a, b| a.0.cmp(b.0));
 
-        // Extract content and join
-        all_blocks
+        // Extract content and join with trailing newline
+        let content = all_blocks
             .iter()
             .map(|(_, content)| *content)
             .collect::<Vec<&str>>()
-            .join("\n")
+            .join("\n\n");
+
+        format!("{}\n", content)
     }
 }
 
@@ -467,7 +466,7 @@ pub fn helper() {}
         assert_eq!(tangled.len(), 1);
         assert_eq!(
             tangled.files.get(&PathBuf::from("output.txt")),
-            Some(&"Line 1\nLine 2".to_string())
+            Some(&"Line 1\n\nLine 2\n".to_string())
         );
     }
 
@@ -487,11 +486,11 @@ pub fn helper() {}
         assert_eq!(tangled.len(), 2);
         assert_eq!(
             tangled.files.get(&PathBuf::from("file1.txt")),
-            Some(&"Content 1".to_string())
+            Some(&"Content 1\n".to_string())
         );
         assert_eq!(
             tangled.files.get(&PathBuf::from("file2.txt")),
-            Some(&"Content 2".to_string())
+            Some(&"Content 2\n".to_string())
         );
     }
 
@@ -535,10 +534,10 @@ Nested file
 
         // Verify the content
         let content1 = fs::read_to_string(temp_output.join("test.txt"))?;
-        assert_eq!(content1, "Hello World");
+        assert_eq!(content1, "Hello World\n");
 
         let content2 = fs::read_to_string(temp_output.join("subdir/test2.txt"))?;
-        assert_eq!(content2, "Nested file");
+        assert_eq!(content2, "Nested file\n");
 
         // Clean up
         fs::remove_dir_all(&temp_input)?;
@@ -598,7 +597,7 @@ Second
         let blocks = Lit::parse_markdown(markdown).unwrap();
         let file_blocks = blocks.get(&PathBuf::from("output.txt")).unwrap();
         let content = file_blocks.to_content();
-        assert_eq!(content, "First\nSecond\nThird");
+        assert_eq!(content, "First\n\nSecond\n\nThird\n");
     }
 
     #[test]
@@ -623,7 +622,10 @@ Unpositioned 2
         let file_blocks = blocks.get(&PathBuf::from("output.txt")).unwrap();
         let content = file_blocks.to_content();
         // "a" < "m" (implicit for unpositioned) < "z"
-        assert_eq!(content, "Before m\nUnpositioned 1\nUnpositioned 2\nAfter m");
+        assert_eq!(
+            content,
+            "Before m\n\nUnpositioned 1\n\nUnpositioned 2\n\nAfter m\n"
+        );
     }
 
     #[test]
@@ -685,7 +687,7 @@ Ten
             result
                 .unwrap_err()
                 .to_string()
-                .contains("must contain only alphabetic letters")
+                .contains("must contain only lowercase letters")
         );
     }
 
@@ -701,7 +703,7 @@ Mixed
             result
                 .unwrap_err()
                 .to_string()
-                .contains("must contain only alphabetic letters")
+                .contains("must contain only lowercase letters")
         );
     }
 
@@ -717,7 +719,7 @@ Special
             result
                 .unwrap_err()
                 .to_string()
-                .contains("must contain only alphabetic letters")
+                .contains("must contain only lowercase letters")
         );
     }
 
@@ -749,7 +751,7 @@ Content
             result
                 .unwrap_err()
                 .to_string()
-                .contains("must not start with 'm' or 'M'")
+                .contains("must not start with 'm'")
         );
     }
 
@@ -765,7 +767,7 @@ Content
             result
                 .unwrap_err()
                 .to_string()
-                .contains("must not start with 'm' or 'M'")
+                .contains("must contain only lowercase letters")
         );
     }
 
@@ -781,12 +783,12 @@ Content
             result
                 .unwrap_err()
                 .to_string()
-                .contains("must not start with 'm' or 'M'")
+                .contains("must not start with 'm'")
         );
     }
 
     #[test]
-    fn test_alphabetic_position_keys_allowed() {
+    fn test_lowercase_position_keys_allowed() {
         let markdown = r#"```tangle://output.txt?at=abc
 First
 ```
@@ -795,7 +797,7 @@ First
 Second
 ```
 
-```tangle://output.txt?at=ABC
+```tangle://output.txt?at=def
 Third
 ```"#;
 
@@ -803,7 +805,83 @@ Third
         let file_blocks = blocks.get(&PathBuf::from("output.txt")).unwrap();
         assert_eq!(file_blocks.positioned.len(), 3);
         let content = file_blocks.to_content();
-        // Lexicographic: "ABC" < "abc" < "xyz"
-        assert_eq!(content, "Third\nFirst\nSecond");
+        // Lexicographic: "abc" < "def" < "xyz"
+        assert_eq!(content, "First\n\nThird\n\nSecond\n");
+    }
+
+    #[test]
+    fn test_uppercase_position_key_rejected() {
+        let markdown = r#"```tangle://output.txt?at=ABC
+Content
+```"#;
+
+        let result = Lit::parse_markdown(markdown);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must contain only lowercase letters")
+        );
+    }
+
+    #[test]
+    fn test_mixed_case_position_key_rejected() {
+        let markdown = r#"```tangle://output.txt?at=aBc
+Content
+```"#;
+
+        let result = Lit::parse_markdown(markdown);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must contain only lowercase letters")
+        );
+    }
+
+    #[test]
+    fn test_tangled_files_end_with_newline() -> Result<()> {
+        use std::env;
+
+        // Create a temporary input directory with markdown files
+        let temp_input = env::temp_dir().join("lit-test-newline-input");
+        let temp_output = env::temp_dir().join("lit-test-newline-output");
+
+        // Clean up if they exist
+        if temp_input.exists() {
+            fs::remove_dir_all(&temp_input)?;
+        }
+        if temp_output.exists() {
+            fs::remove_dir_all(&temp_output)?;
+        }
+
+        // Create input directory and markdown file
+        fs::create_dir_all(&temp_input)?;
+        let markdown = r#"# Test
+
+```tangle://test.txt
+Line 1
+```
+"#;
+        fs::write(temp_input.join("test.md"), markdown)?;
+
+        // Create Lit and tangle
+        let lit = Lit::new(temp_input.clone(), temp_output.clone());
+        lit.tangle()?;
+
+        // Verify the file ends with a newline
+        let content = fs::read_to_string(temp_output.join("test.txt"))?;
+        assert!(
+            content.ends_with('\n'),
+            "Tangled file should end with a newline"
+        );
+
+        // Clean up
+        fs::remove_dir_all(&temp_input)?;
+        fs::remove_dir_all(&temp_output)?;
+
+        Ok(())
     }
 }
