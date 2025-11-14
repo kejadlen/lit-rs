@@ -6,28 +6,32 @@ This is a simple example demonstrating how to use `lit` for literate programming
 
 Literate programming allows you to write documentation and code together, extracting the code into separate files. In `lit`, you use special code blocks with the `tangle://` prefix to specify where code should be extracted.
 
-## Creating a Simple Program
+## Creating a Shell Script
 
-Let's create a simple "Hello, World!" program in Rust. First, we'll set up our main function:
+Let's create a simple "Hello, World!" shell script. First, we'll add the shebang and main greeting:
 
-```tangle://src/hello.rs
-fn main() {
-    println!("Hello, World!");
-    greet("Alice");
-}
+```tangle://hello.sh
+#!/bin/bash
+
+echo "Hello, World!"
 ```
 
-We also want to add a helper function to greet people by name:
+We can also add a function to greet people by name:
 
-```tangle://src/hello.rs
-fn greet(name: &str) {
-    println!("Hello, {}!", name);
+```tangle://hello.sh
+
+greet() {
+    local name="$1"
+    echo "Hello, $name!"
 }
+
+greet "Alice"
+greet "Bob"
 ```
 
 ## Configuration
 
-We'll also create a simple configuration file for our project:
+We'll also create a simple configuration file:
 
 ```tangle://config.txt
 name=hello-world
@@ -43,6 +47,13 @@ lit examples/
 ```
 
 This will find all markdown files in the `examples/` directory and extract tangle blocks, showing you which files would be generated and how many lines of code each contains.
+
+To run the generated script:
+
+```bash
+chmod +x hello.sh
+./hello.sh
+```
 
 ## Notes
 
