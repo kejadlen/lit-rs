@@ -6,6 +6,7 @@ use std::fs;
 use std::path::PathBuf;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
+use url::Url;
 use walkdir::WalkDir;
 
 /// Represents blocks for a single file, with positioned and unpositioned blocks separated
@@ -110,15 +111,39 @@ impl Lit {
     /// Parse a tangle:// URL to extract the path and optional at parameter
     /// Returns (path, at) where at is Some(position_key) if present
     fn parse_tangle_url(url: &str) -> Option<(PathBuf, Option<String>)> {
-        let stripped = url.strip_prefix("tangle://")?;
+        // Parse the URL using the url crate
+        let parsed = Url::parse(url).ok()?;
 
-        if let Some((path, query)) = stripped.split_once('?') {
-            // Parse query parameters - for now we only support at=value
-            let at = query.strip_prefix("at=").map(|s| s.to_string());
-            Some((PathBuf::from(path), at))
-        } else {
-            Some((PathBuf::from(stripped), None))
+        // Verify it's a tangle:// URL
+        if parsed.scheme() != "tangle" {
+            return None;
         }
+
+        // Get the path (host + path for URLs like tangle://path/to/file)
+        // The url crate treats tangle://path as having host="path"
+        let path_str = if parsed.host_str().is_some() {
+            // For URLs like tangle://file.txt or tangle://path/to/file.txt
+            // We need to combine host and path
+            let host = parsed.host_str()?;
+            let path = parsed.path();
+            if path.is_empty() || path == "/" {
+                host.to_string()
+            } else {
+                // path already starts with '/', so just concatenate
+                format!("{host}{path}")
+            }
+        } else {
+            // Fallback to just the path
+            parsed.path().trim_start_matches('/').to_string()
+        };
+
+        // Parse query parameters to extract the "at" parameter
+        let at = parsed
+            .query_pairs()
+            .find(|(key, _)| key == "at")
+            .map(|(_, value)| value.to_string());
+
+        Some((PathBuf::from(path_str), at))
     }
 
     /// Parse markdown content and extract code blocks with tangle:// paths
