@@ -170,33 +170,23 @@ impl Lit {
 
     /// Parse markdown content and extract code blocks with tangle:// paths
     fn parse_markdown(markdown_text: &str) -> Result<Vec<Block>> {
-        let ast = match to_mdast(markdown_text, &ParseOptions::default()) {
-            Ok(ast) => ast,
-            Err(_) => return Ok(Vec::new()),
+        let ast = to_mdast(markdown_text, &ParseOptions::default())
+            .map_err(|e| color_eyre::eyre::eyre!("Failed to parse markdown: {}", e))?;
+
+        let Node::Root(root) = ast else {
+            bail!("Expected root node in markdown AST");
         };
 
-        let mut blocks = Vec::new();
-
         // Extract snippets from top-level code blocks only
-        if let Node::Root(root) = ast {
-            for child in &root.children {
-                // Try to parse as a Block - skip if it's not a tangle block
-                match Block::try_from(child) {
-                    Ok(block) => {
-                        blocks.push(block);
-                    }
-                    Err(BlockError::NotTangleBlock) => {
-                        // Skip non-tangle code blocks silently
-                    }
-                    Err(e) => {
-                        // Propagate all other errors (invalid tangle URLs, bad paths, etc.)
-                        bail!(e);
-                    }
-                }
-            }
-        }
-
-        Ok(blocks)
+        root.children
+            .iter()
+            .map(|child| Block::try_from(child))
+            .filter_map(|result| match result {
+                Ok(block) => Some(Ok(block)),
+                Err(BlockError::NotTangleBlock) => None,
+                Err(e) => Some(Err(e.into())),
+            })
+            .collect()
     }
 
     /// Read all markdown files from input directory and parse tangle blocks
