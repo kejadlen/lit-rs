@@ -114,3 +114,159 @@ fn main() -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_single_tangle_block() {
+        let markdown = r#"# Test
+
+```tangle://src/main.rs
+fn main() {
+    println!("Hello");
+}
+```
+"#;
+
+        let blocks = parse_tangle_blocks(markdown);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].path, PathBuf::from("src/main.rs"));
+        assert_eq!(blocks[0].content, "fn main() {\n    println!(\"Hello\");\n}");
+    }
+
+    #[test]
+    fn test_multiple_tangle_blocks() {
+        let markdown = r#"# Multiple Blocks
+
+```tangle://file1.rs
+code 1
+```
+
+Some text here.
+
+```tangle://file2.rs
+code 2
+```
+"#;
+
+        let blocks = parse_tangle_blocks(markdown);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].path, PathBuf::from("file1.rs"));
+        assert_eq!(blocks[0].content, "code 1");
+        assert_eq!(blocks[1].path, PathBuf::from("file2.rs"));
+        assert_eq!(blocks[1].content, "code 2");
+    }
+
+    #[test]
+    fn test_ignore_regular_code_blocks() {
+        let markdown = r#"# Test
+
+```rust
+// This is regular code
+let x = 42;
+```
+
+```tangle://output.rs
+// This should be extracted
+let y = 10;
+```
+"#;
+
+        let blocks = parse_tangle_blocks(markdown);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].path, PathBuf::from("output.rs"));
+        assert_eq!(blocks[0].content, "// This should be extracted\nlet y = 10;");
+    }
+
+    #[test]
+    fn test_ignore_nested_in_blockquote() {
+        let markdown = r#"# Test
+
+```tangle://top-level.txt
+Top level content
+```
+
+> Blockquote here
+>
+> ```tangle://nested.txt
+> This should NOT be extracted
+> ```
+"#;
+
+        let blocks = parse_tangle_blocks(markdown);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].path, PathBuf::from("top-level.txt"));
+        assert_eq!(blocks[0].content, "Top level content");
+    }
+
+    #[test]
+    fn test_ignore_nested_in_list() {
+        let markdown = r#"# Test
+
+```tangle://top-level.txt
+Top level content
+```
+
+- Item 1
+- Item 2
+
+  ```tangle://nested.txt
+  This should NOT be extracted
+  ```
+"#;
+
+        let blocks = parse_tangle_blocks(markdown);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].path, PathBuf::from("top-level.txt"));
+        assert_eq!(blocks[0].content, "Top level content");
+    }
+
+    #[test]
+    fn test_empty_markdown() {
+        let markdown = "";
+        let blocks = parse_tangle_blocks(markdown);
+        assert_eq!(blocks.len(), 0);
+    }
+
+    #[test]
+    fn test_no_tangle_blocks() {
+        let markdown = r#"# Just a regular document
+
+Some text here.
+
+```rust
+Regular code block
+```
+
+More text.
+"#;
+
+        let blocks = parse_tangle_blocks(markdown);
+        assert_eq!(blocks.len(), 0);
+    }
+
+    #[test]
+    fn test_tangle_with_subdirectory_path() {
+        let markdown = r#"```tangle://src/modules/utils.rs
+pub fn helper() {}
+```"#;
+
+        let blocks = parse_tangle_blocks(markdown);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].path, PathBuf::from("src/modules/utils.rs"));
+        assert_eq!(blocks[0].content, "pub fn helper() {}");
+    }
+
+    #[test]
+    fn test_empty_tangle_block() {
+        let markdown = r#"```tangle://empty.txt
+```"#;
+
+        let blocks = parse_tangle_blocks(markdown);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].path, PathBuf::from("empty.txt"));
+        assert_eq!(blocks[0].content, "");
+    }
+}
