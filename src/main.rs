@@ -18,7 +18,7 @@ enum PositionError {
     #[error("Position key '{0}' must contain only lowercase letters")]
     InvalidCharacters(String),
     #[error("Position key '{0}' must not start with 'm'")]
-    StartsWithM(String),
+    ReservedPrefix(String),
 }
 
 /// Errors that can occur when parsing a block from a markdown node
@@ -55,7 +55,7 @@ impl TryFrom<String> for Position {
         }
 
         if value.starts_with('m') {
-            return Err(PositionError::StartsWithM(value));
+            return Err(PositionError::ReservedPrefix(value));
         }
 
         Ok(Position(value))
