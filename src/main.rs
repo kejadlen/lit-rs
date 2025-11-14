@@ -108,7 +108,8 @@ impl TryFrom<&Node> for Block {
         if path.starts_with("//") {
             return Err(BlockError::InvalidPath);
         }
-        let path_str = path.trim_start_matches('/').to_string();
+        // Strip the single leading slash to get a relative path
+        let path_str = path.strip_prefix('/').unwrap().to_string();
 
         // Parse query parameters to extract the "at" parameter
         let position = parsed
