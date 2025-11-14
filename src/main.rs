@@ -14,49 +14,86 @@ struct Args {
     directory: PathBuf,
 }
 
+/// Manages snippets and owns their content strings
+#[derive(Debug)]
+struct SnippetsManager {
+    /// File paths for each snippet
+    paths: Vec<PathBuf>,
+    /// Owned content strings
+    contents: Vec<String>,
+}
+
+impl SnippetsManager {
+    /// Create an iterator over snippets with borrowed content
+    fn iter(&self) -> impl Iterator<Item = Snippet<'_>> + '_ {
+        self.paths
+            .iter()
+            .zip(self.contents.iter())
+            .map(|(path, content)| Snippet {
+                path,
+                content: content.as_str(),
+            })
+    }
+
+    /// Get the number of snippets
+    fn len(&self) -> usize {
+        self.paths.len()
+    }
+
+    /// Check if there are no snippets
+    fn is_empty(&self) -> bool {
+        self.paths.is_empty()
+    }
+}
+
 /// Represents a code snippet with a tangle path
 #[derive(Debug, Clone, PartialEq)]
-struct Snippet {
+struct Snippet<'a> {
     /// The file path where this code should be written
-    path: PathBuf,
-    /// The code content
-    content: String,
+    path: &'a PathBuf,
+    /// The code content (borrowed)
+    content: &'a str,
 }
 
 /// Parse a markdown file and extract all tangle code blocks
-fn parse_markdown_file(path: &PathBuf) -> Result<Vec<Snippet>> {
+fn parse_markdown_file(path: &PathBuf) -> Result<SnippetsManager> {
     let content = fs::read_to_string(path)?;
     Ok(parse_tangle_blocks(&content))
 }
 
 /// Parse markdown content and extract code blocks with tangle:// paths
-fn parse_tangle_blocks(markdown_text: &str) -> Vec<Snippet> {
+fn parse_tangle_blocks(markdown_text: &str) -> SnippetsManager {
     use markdown::mdast::Node;
 
     // Parse markdown to AST
     let ast = match to_mdast(markdown_text, &ParseOptions::default()) {
         Ok(ast) => ast,
-        Err(_) => return Vec::new(),
+        Err(_) => {
+            return SnippetsManager {
+                paths: Vec::new(),
+                contents: Vec::new(),
+            }
+        }
     };
 
+    let mut paths = Vec::new();
+    let mut contents = Vec::new();
+
     // Extract snippets from top-level code blocks only
-    let mut snippets = Vec::new();
     if let Node::Root(root) = ast {
         for child in &root.children {
             if let Node::Code(code) = child {
                 if let Some(lang) = &code.lang {
                     if let Some(path_str) = lang.strip_prefix("tangle://") {
-                        snippets.push(Snippet {
-                            path: PathBuf::from(path_str),
-                            content: code.value.clone(),
-                        });
+                        paths.push(PathBuf::from(path_str));
+                        contents.push(code.value.clone());
                     }
                 }
             }
         }
     }
 
-    snippets
+    SnippetsManager { paths, contents }
 }
 
 fn main() -> Result<()> {
@@ -78,12 +115,12 @@ fn main() -> Result<()> {
                     println!("File: {}", path.display());
 
                     match parse_markdown_file(&path) {
-                        Ok(snippets) => {
-                            if snippets.is_empty() {
+                        Ok(manager) => {
+                            if manager.is_empty() {
                                 println!("  No tangle blocks found");
                             } else {
-                                println!("  Found {} tangle block(s):", snippets.len());
-                                for snippet in snippets {
+                                println!("  Found {} tangle block(s):", manager.len());
+                                for snippet in manager.iter() {
                                     println!("    → {}", snippet.path.display());
                                     println!("      {} lines", snippet.content.lines().count());
                                 }
@@ -117,9 +154,11 @@ fn main() {
 ```
 "#;
 
-        let snippets = parse_tangle_blocks(markdown);
-        assert_eq!(snippets.len(), 1);
-        assert_eq!(snippets[0].path, PathBuf::from("src/main.rs"));
+        let manager = parse_tangle_blocks(markdown);
+        assert_eq!(manager.len(), 1);
+
+        let snippets: Vec<_> = manager.iter().collect();
+        assert_eq!(snippets[0].path, &PathBuf::from("src/main.rs"));
         assert_eq!(snippets[0].content, "fn main() {\n    println!(\"Hello\");\n}");
     }
 
@@ -138,11 +177,13 @@ code 2
 ```
 "#;
 
-        let snippets = parse_tangle_blocks(markdown);
-        assert_eq!(snippets.len(), 2);
-        assert_eq!(snippets[0].path, PathBuf::from("file1.rs"));
+        let manager = parse_tangle_blocks(markdown);
+        assert_eq!(manager.len(), 2);
+
+        let snippets: Vec<_> = manager.iter().collect();
+        assert_eq!(snippets[0].path, &PathBuf::from("file1.rs"));
         assert_eq!(snippets[0].content, "code 1");
-        assert_eq!(snippets[1].path, PathBuf::from("file2.rs"));
+        assert_eq!(snippets[1].path, &PathBuf::from("file2.rs"));
         assert_eq!(snippets[1].content, "code 2");
     }
 
@@ -161,9 +202,11 @@ let y = 10;
 ```
 "#;
 
-        let snippets = parse_tangle_blocks(markdown);
-        assert_eq!(snippets.len(), 1);
-        assert_eq!(snippets[0].path, PathBuf::from("output.rs"));
+        let manager = parse_tangle_blocks(markdown);
+        assert_eq!(manager.len(), 1);
+
+        let snippets: Vec<_> = manager.iter().collect();
+        assert_eq!(snippets[0].path, &PathBuf::from("output.rs"));
         assert_eq!(snippets[0].content, "// This should be extracted\nlet y = 10;");
     }
 
@@ -182,9 +225,11 @@ Top level content
 > ```
 "#;
 
-        let snippets = parse_tangle_blocks(markdown);
-        assert_eq!(snippets.len(), 1);
-        assert_eq!(snippets[0].path, PathBuf::from("top-level.txt"));
+        let manager = parse_tangle_blocks(markdown);
+        assert_eq!(manager.len(), 1);
+
+        let snippets: Vec<_> = manager.iter().collect();
+        assert_eq!(snippets[0].path, &PathBuf::from("top-level.txt"));
         assert_eq!(snippets[0].content, "Top level content");
     }
 
@@ -204,17 +249,19 @@ Top level content
   ```
 "#;
 
-        let snippets = parse_tangle_blocks(markdown);
-        assert_eq!(snippets.len(), 1);
-        assert_eq!(snippets[0].path, PathBuf::from("top-level.txt"));
+        let manager = parse_tangle_blocks(markdown);
+        assert_eq!(manager.len(), 1);
+
+        let snippets: Vec<_> = manager.iter().collect();
+        assert_eq!(snippets[0].path, &PathBuf::from("top-level.txt"));
         assert_eq!(snippets[0].content, "Top level content");
     }
 
     #[test]
     fn test_empty_markdown() {
         let markdown = "";
-        let snippets = parse_tangle_blocks(markdown);
-        assert_eq!(snippets.len(), 0);
+        let manager = parse_tangle_blocks(markdown);
+        assert_eq!(manager.len(), 0);
     }
 
     #[test]
@@ -230,8 +277,8 @@ Regular code block
 More text.
 "#;
 
-        let snippets = parse_tangle_blocks(markdown);
-        assert_eq!(snippets.len(), 0);
+        let manager = parse_tangle_blocks(markdown);
+        assert_eq!(manager.len(), 0);
     }
 
     #[test]
@@ -240,9 +287,11 @@ More text.
 pub fn helper() {}
 ```"#;
 
-        let snippets = parse_tangle_blocks(markdown);
-        assert_eq!(snippets.len(), 1);
-        assert_eq!(snippets[0].path, PathBuf::from("src/modules/utils.rs"));
+        let manager = parse_tangle_blocks(markdown);
+        assert_eq!(manager.len(), 1);
+
+        let snippets: Vec<_> = manager.iter().collect();
+        assert_eq!(snippets[0].path, &PathBuf::from("src/modules/utils.rs"));
         assert_eq!(snippets[0].content, "pub fn helper() {}");
     }
 
@@ -251,9 +300,11 @@ pub fn helper() {}
         let markdown = r#"```tangle://empty.txt
 ```"#;
 
-        let snippets = parse_tangle_blocks(markdown);
-        assert_eq!(snippets.len(), 1);
-        assert_eq!(snippets[0].path, PathBuf::from("empty.txt"));
+        let manager = parse_tangle_blocks(markdown);
+        assert_eq!(manager.len(), 1);
+
+        let snippets: Vec<_> = manager.iter().collect();
+        assert_eq!(snippets[0].path, &PathBuf::from("empty.txt"));
         assert_eq!(snippets[0].content, "");
     }
 }
