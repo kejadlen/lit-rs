@@ -24,6 +24,55 @@ struct Lit {
     output: HashMap<PathBuf, Vec<String>>,
 }
 
+/// Represents tangled files ready to be written to disk
+#[derive(Debug)]
+struct TangledFiles {
+    /// Map from file path to concatenated content
+    files: HashMap<PathBuf, String>,
+}
+
+impl TangledFiles {
+    /// Create TangledFiles from a Lit instance by concatenating all snippets
+    fn from_lit(lit: &Lit) -> Self {
+        let files = lit.output
+            .iter()
+            .map(|(path, snippets)| {
+                let content = snippets.join("\n");
+                (path.clone(), content)
+            })
+            .collect();
+
+        TangledFiles { files }
+    }
+
+    /// Write all tangled files to the specified output directory
+    fn write_all(&self, output_dir: &PathBuf) -> Result<()> {
+        for (path, content) in &self.files {
+            let full_path = output_dir.join(path);
+
+            // Create parent directories if they don't exist
+            if let Some(parent) = full_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+
+            // Write the file
+            fs::write(&full_path, content)?;
+        }
+
+        Ok(())
+    }
+
+    /// Get the number of files
+    fn len(&self) -> usize {
+        self.files.len()
+    }
+
+    /// Check if there are no files
+    fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+}
+
 impl Lit {
     /// Parse markdown content and extract code blocks with tangle:// paths
     fn from_markdown(markdown_text: &str) -> Self {
@@ -101,6 +150,13 @@ impl Lit {
     /// Check if there are no snippets
     fn is_empty(&self) -> bool {
         self.output.is_empty()
+    }
+
+    /// Tangle the code blocks and write them to the output directory
+    fn tangle(&self, output_dir: &PathBuf) -> Result<()> {
+        let tangled = TangledFiles::from_lit(self);
+        tangled.write_all(output_dir)?;
+        Ok(())
     }
 }
 
@@ -293,5 +349,89 @@ pub fn helper() {}
         let snippets: Vec<_> = lit.iter().collect();
         assert_eq!(snippets[0].0, &PathBuf::from("empty.txt"));
         assert_eq!(snippets[0].1, "");
+    }
+
+    #[test]
+    fn test_tangled_files_from_lit() {
+        let markdown = r#"# Test
+
+```tangle://output.txt
+Line 1
+```
+
+```tangle://output.txt
+Line 2
+```
+"#;
+
+        let lit = Lit::from_markdown(markdown);
+        let tangled = TangledFiles::from_lit(&lit);
+
+        assert_eq!(tangled.len(), 1);
+        assert_eq!(tangled.files.get(&PathBuf::from("output.txt")), Some(&"Line 1\nLine 2".to_string()));
+    }
+
+    #[test]
+    fn test_tangled_files_multiple_files() {
+        let markdown = r#"# Test
+
+```tangle://file1.txt
+Content 1
+```
+
+```tangle://file2.txt
+Content 2
+```
+"#;
+
+        let lit = Lit::from_markdown(markdown);
+        let tangled = TangledFiles::from_lit(&lit);
+
+        assert_eq!(tangled.len(), 2);
+        assert_eq!(tangled.files.get(&PathBuf::from("file1.txt")), Some(&"Content 1".to_string()));
+        assert_eq!(tangled.files.get(&PathBuf::from("file2.txt")), Some(&"Content 2".to_string()));
+    }
+
+    #[test]
+    fn test_tangle_writes_files() -> Result<()> {
+        use std::env;
+
+        let markdown = r#"# Test
+
+```tangle://test.txt
+Hello World
+```
+
+```tangle://subdir/test2.txt
+Nested file
+```
+"#;
+
+        let lit = Lit::from_markdown(markdown);
+
+        // Create a temporary directory for testing
+        let temp_dir = env::temp_dir().join("lit-test-tangle");
+        if temp_dir.exists() {
+            fs::remove_dir_all(&temp_dir)?;
+        }
+
+        // Tangle the files
+        lit.tangle(&temp_dir)?;
+
+        // Verify the files were created
+        assert!(temp_dir.join("test.txt").exists());
+        assert!(temp_dir.join("subdir/test2.txt").exists());
+
+        // Verify the content
+        let content1 = fs::read_to_string(temp_dir.join("test.txt"))?;
+        assert_eq!(content1, "Hello World");
+
+        let content2 = fs::read_to_string(temp_dir.join("subdir/test2.txt"))?;
+        assert_eq!(content2, "Nested file");
+
+        // Clean up
+        fs::remove_dir_all(&temp_dir)?;
+
+        Ok(())
     }
 }
