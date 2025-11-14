@@ -32,6 +32,8 @@ enum BlockError {
     InvalidTangleUrl,
     #[error("Tangle URL missing path")]
     MissingPath,
+    #[error("Tangle URL path must be relative, not absolute")]
+    AbsolutePath,
     #[error(transparent)]
     PositionError(#[from] PositionError),
 }
@@ -104,6 +106,9 @@ impl TryFrom<&Node> for Block {
         let path = parsed.path();
         if path.is_empty() || path == "/" {
             return Err(BlockError::MissingPath);
+        }
+        if path.starts_with("//") {
+            return Err(BlockError::AbsolutePath);
         }
         let path_str = path.trim_start_matches('/').to_string();
 
@@ -235,6 +240,10 @@ impl Lit {
                     Err(BlockError::MissingPath) => {
                         // Propagate missing path errors for tangle blocks
                         bail!(BlockError::MissingPath);
+                    }
+                    Err(BlockError::AbsolutePath) => {
+                        // Propagate absolute path errors for tangle blocks
+                        bail!(BlockError::AbsolutePath);
                     }
                     Err(_) => {
                         // Skip non-tangle code blocks silently
@@ -734,6 +743,22 @@ test content
                 .unwrap_err()
                 .to_string()
                 .contains("must be hostless")
+        );
+    }
+
+    #[test]
+    fn test_block_with_absolute_path_rejected() {
+        let markdown = r#"```tangle:////absolute/path.txt
+test content
+```"#;
+
+        let result = Lit::parse_markdown(markdown);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must be relative")
         );
     }
 
