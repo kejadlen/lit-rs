@@ -3,7 +3,7 @@ use color_eyre::{Result, eyre::ensure};
 use markdown::{ParseOptions, to_mdast};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 use walkdir::WalkDir;
@@ -110,7 +110,7 @@ struct TangledFiles {
 
 impl TangledFiles {
     /// Write all tangled files to the specified output directory
-    fn write_all(&self, output_dir: &PathBuf) -> Result<()> {
+    fn write_all(&self, output_dir: &Path) -> Result<()> {
         for (path, content) in &self.files {
             let full_path = output_dir.join(path);
 
@@ -124,16 +124,6 @@ impl TangledFiles {
         }
 
         Ok(())
-    }
-
-    /// Get the number of files
-    fn len(&self) -> usize {
-        self.files.len()
-    }
-
-    /// Check if there are no files
-    fn is_empty(&self) -> bool {
-        self.files.is_empty()
     }
 }
 
@@ -172,17 +162,16 @@ impl Lit {
         // Extract snippets from top-level code blocks only
         if let Node::Root(root) = ast {
             for child in &root.children {
-                if let Node::Code(code) = child {
-                    if let Some(lang) = &code.lang {
-                        if let Some((path, at)) = Self::parse_tangle_url(lang) {
-                            let file_blocks = files.entry(path).or_insert_with(FileBlocks::default);
+                if let Node::Code(code) = child
+                    && let Some(lang) = &code.lang
+                    && let Some((path, at)) = Self::parse_tangle_url(lang)
+                {
+                    let file_blocks = files.entry(path).or_default();
 
-                            if let Some(at_key) = at {
-                                file_blocks.add_positioned(at_key, code.value.clone())?;
-                            } else {
-                                file_blocks.add_unpositioned(code.value.clone());
-                            }
-                        }
+                    if let Some(at_key) = at {
+                        file_blocks.add_positioned(at_key, code.value.clone())?;
+                    } else {
+                        file_blocks.add_unpositioned(code.value.clone());
                     }
                 }
             }
@@ -199,14 +188,14 @@ impl Lit {
             .into_iter()
             .filter_map(|e| e.ok())
             .filter(|entry| entry.file_type().is_file())
-            .filter(|entry| entry.path().extension().map_or(false, |ext| ext == "md"))
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "md"))
             .try_for_each(|entry| -> Result<()> {
                 let content = fs::read_to_string(entry.path())?;
                 let blocks = Self::parse_markdown(&content)?;
 
                 // Merge the parsed blocks into our files HashMap
                 for (path, file_blocks) in blocks {
-                    let target = files.entry(path).or_insert_with(FileBlocks::default);
+                    let target = files.entry(path).or_default();
 
                     // Add positioned blocks
                     for (at, content) in file_blocks.positioned {
@@ -470,7 +459,7 @@ pub fn helper() {}
 
         let tangled = Lit::to_tangled_files(blocks);
 
-        assert_eq!(tangled.len(), 1);
+        assert_eq!(tangled.files.len(), 1);
         assert_eq!(
             tangled.files.get(&PathBuf::from("output.txt")),
             Some(&"Line 1\n\nLine 2\n".to_string())
@@ -490,7 +479,7 @@ pub fn helper() {}
 
         let tangled = Lit::to_tangled_files(blocks);
 
-        assert_eq!(tangled.len(), 2);
+        assert_eq!(tangled.files.len(), 2);
         assert_eq!(
             tangled.files.get(&PathBuf::from("file1.txt")),
             Some(&"Content 1\n".to_string())
