@@ -7,5 +7,6 @@ edition = "2024"
 clap = { version = "*", features = ["derive"] }
 color-eyre = "*"
 markdown = "*"
-tracing-subscriber = "*"
+tracing = "*"
+tracing-subscriber = { version = "*", features = ["env-filter"] }
 walkdir = "*"

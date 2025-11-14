@@ -1,9 +1,11 @@
 use clap::Parser;
-use color_eyre::{eyre::ensure, Result};
+use color_eyre::{Result, eyre::ensure};
 use markdown::{ParseOptions, to_mdast};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use tracing::info;
+use tracing_subscriber::EnvFilter;
 use walkdir::WalkDir;
 
 /// Represents blocks for a single file, with positioned and unpositioned blocks separated
@@ -73,7 +75,7 @@ impl FileBlocks {
             .collect::<Vec<&str>>()
             .join("\n\n");
 
-        format!("{}\n", content)
+        format!("{content}\n")
     }
 }
 
@@ -246,18 +248,24 @@ impl Lit {
 
 fn main() -> Result<()> {
     color_eyre::install()?;
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
 
     let args = Args::parse();
     let output = args.output.unwrap_or_else(|| args.directory.join("out"));
 
-    println!("Reading markdown files from: {}", args.directory.display());
-    println!("Writing tangled files to: {}\n", output.display());
+    let input_display = args.directory.display();
+    let output_display = output.display();
+    info!("Reading markdown files from: {input_display}");
+    info!("Writing tangled files to: {output_display}");
 
     let lit = Lit::new(args.directory, output);
     lit.tangle()?;
 
-    println!("Tangling complete!");
+    info!("Tangling complete!");
 
     Ok(())
 }
