@@ -140,6 +140,32 @@ impl TryFrom<&Node> for Block {
     }
 }
 
+/// Represents a tangled file with all its blocks
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TangledFile {
+    /// The destination file path
+    path: PathBuf,
+    /// The blocks that belong to this file
+    blocks: Vec<Block>,
+}
+
+impl TangledFile {
+    /// Render the content by sorting blocks and concatenating them
+    fn render(&mut self) -> String {
+        // Sort blocks by position
+        self.blocks.sort();
+
+        // Concatenate content
+        let content = self.blocks
+            .iter()
+            .map(|b| b.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        format!("{content}\n")
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "lit")]
 #[command(about = "A literate programming tool", long_about = None)]
@@ -190,25 +216,27 @@ impl Lit {
     }
 
     /// Read all markdown files from input directory and parse tangle blocks
-    fn read_blocks(&self) -> Result<HashMap<PathBuf, Vec<Block>>> {
-        WalkDir::new(&self.input)
+    fn read_blocks(&self) -> Result<Vec<TangledFile>> {
+        let mut files = HashMap::<PathBuf, Vec<Block>>::new();
+
+        for entry in WalkDir::new(&self.input)
             .into_iter()
             .filter_map(|e| e.ok())
             .filter(|entry| entry.file_type().is_file())
             .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "md"))
-            .try_fold(
-                HashMap::<PathBuf, Vec<Block>>::new(),
-                |mut files, entry| -> Result<_> {
-                    let content = fs::read_to_string(entry.path())?;
-                    let blocks = Self::parse_markdown(&content)?;
+        {
+            let content = fs::read_to_string(entry.path())?;
+            let blocks = Self::parse_markdown(&content)?;
 
-                    for block in blocks {
-                        files.entry(block.path.clone()).or_default().push(block);
-                    }
+            for block in blocks {
+                files.entry(block.path.clone()).or_default().push(block);
+            }
+        }
 
-                    Ok(files)
-                },
-            )
+        Ok(files
+            .into_iter()
+            .map(|(path, blocks)| TangledFile { path, blocks })
+            .collect())
     }
 
     /// Tangle the code blocks: read from input, parse, and write to output
@@ -218,20 +246,12 @@ impl Lit {
         // Process each file using try_for_each
         files
             .into_iter()
-            .try_for_each(|(path, mut blocks)| -> Result<()> {
-                // Sort blocks by position
-                blocks.sort();
-
-                // Concatenate content
-                let content = blocks
-                    .iter()
-                    .map(|b| b.content.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n\n");
-                let content = format!("{content}\n");
+            .try_for_each(|mut file| -> Result<()> {
+                // Render the content
+                let content = file.render();
 
                 // Write to file
-                let full_path = self.output.join(path);
+                let full_path = self.output.join(&file.path);
                 if let Some(parent) = full_path.parent() {
                     fs::create_dir_all(parent)?;
                 }
