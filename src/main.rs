@@ -17,7 +17,29 @@ struct FileBlocks {
 
 impl FileBlocks {
     /// Add an ordered block, returning an error if the order key is not unique
+    /// or if it contains non-alphabetic characters
     fn add_ordered(&mut self, order: String, content: String) -> Result<()> {
+        // Validate that order key is not empty
+        if order.is_empty() {
+            return Err(eyre!("Order key must not be empty"));
+        }
+
+        // Validate that order key only contains alphabetic characters
+        if !order.chars().all(|c| c.is_alphabetic()) {
+            return Err(eyre!(
+                "Order key '{}' must contain only alphabetic letters",
+                order
+            ));
+        }
+
+        // Disallow order keys starting with 'm' or 'M'
+        if order.starts_with('m') || order.starts_with('M') {
+            return Err(eyre!(
+                "Order key '{}' must not start with 'm' or 'M'",
+                order
+            ));
+        }
+
         if self.ordered.iter().any(|(o, _)| o == &order) {
             return Err(eyre!("Duplicate order key '{}' for the same file", order));
         }
@@ -30,17 +52,27 @@ impl FileBlocks {
         self.unordered.push(content);
     }
 
-    /// Get the concatenated content with ordered blocks first (sorted lexicographically),
-    /// then unordered blocks
+    /// Get the concatenated content with blocks sorted lexicographically by order key.
+    /// Unordered blocks are implicitly sorted at position "m".
     fn to_content(&self) -> String {
-        let mut ordered = self.ordered.clone();
-        ordered.sort_by(|a, b| a.0.cmp(&b.0)); // Sort by order key lexicographically
+        // Collect all blocks with their effective sort keys
+        let mut all_blocks: Vec<(&str, &str)> = Vec::new();
 
-        let ordered_content: Vec<&str> = ordered.iter().map(|(_, content)| content.as_str()).collect();
-        let unordered_content: Vec<&str> = self.unordered.iter().map(|s| s.as_str()).collect();
+        // Add ordered blocks with their explicit keys
+        for (order, content) in &self.ordered {
+            all_blocks.push((order.as_str(), content.as_str()));
+        }
 
-        let all_content: Vec<&str> = ordered_content.into_iter().chain(unordered_content).collect();
-        all_content.join("\n")
+        // Add unordered blocks with implicit "m" key
+        for content in &self.unordered {
+            all_blocks.push(("m", content.as_str()));
+        }
+
+        // Sort by order key lexicographically
+        all_blocks.sort_by(|a, b| a.0.cmp(b.0));
+
+        // Extract content and join
+        all_blocks.iter().map(|(_, content)| *content).collect::<Vec<&str>>().join("\n")
     }
 }
 
@@ -520,13 +552,17 @@ Second
     }
 
     #[test]
-    fn test_ordered_blocks_before_unordered() {
+    fn test_ordered_blocks_around_implicit_m() {
         let markdown = r#"```tangle://output.txt
 Unordered 1
 ```
 
 ```tangle://output.txt?order=a
-Ordered
+Before m
+```
+
+```tangle://output.txt?order=z
+After m
 ```
 
 ```tangle://output.txt
@@ -536,7 +572,8 @@ Unordered 2
         let blocks = Lit::parse_markdown(markdown).unwrap();
         let file_blocks = blocks.get(&PathBuf::from("output.txt")).unwrap();
         let content = file_blocks.to_content();
-        assert_eq!(content, "Ordered\nUnordered 1\nUnordered 2");
+        // "a" < "m" (implicit for unordered) < "z"
+        assert_eq!(content, "Before m\nUnordered 1\nUnordered 2\nAfter m");
     }
 
     #[test]
@@ -579,23 +616,101 @@ Duplicate
     }
 
     #[test]
-    fn test_numeric_order_lexicographic_sorting() {
+    fn test_numeric_order_keys_rejected() {
         let markdown = r#"```tangle://output.txt?order=10
 Ten
+```"#;
+
+        let result = Lit::parse_markdown(markdown);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must contain only alphabetic letters"));
+    }
+
+    #[test]
+    fn test_order_key_with_numbers_rejected() {
+        let markdown = r#"```tangle://output.txt?order=a1
+Mixed
+```"#;
+
+        let result = Lit::parse_markdown(markdown);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must contain only alphabetic letters"));
+    }
+
+    #[test]
+    fn test_order_key_with_special_chars_rejected() {
+        let markdown = r#"```tangle://output.txt?order=a-b
+Special
+```"#;
+
+        let result = Lit::parse_markdown(markdown);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must contain only alphabetic letters"));
+    }
+
+    #[test]
+    fn test_empty_order_key_rejected() {
+        let markdown = r#"```tangle://output.txt?order=
+Empty
+```"#;
+
+        let result = Lit::parse_markdown(markdown);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn test_order_key_starting_with_m_rejected() {
+        let markdown = r#"```tangle://output.txt?order=main
+Content
+```"#;
+
+        let result = Lit::parse_markdown(markdown);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must not start with 'm' or 'M'"));
+    }
+
+    #[test]
+    fn test_order_key_starting_with_capital_m_rejected() {
+        let markdown = r#"```tangle://output.txt?order=Main
+Content
+```"#;
+
+        let result = Lit::parse_markdown(markdown);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must not start with 'm' or 'M'"));
+    }
+
+    #[test]
+    fn test_order_key_just_m_rejected() {
+        let markdown = r#"```tangle://output.txt?order=m
+Content
+```"#;
+
+        let result = Lit::parse_markdown(markdown);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must not start with 'm' or 'M'"));
+    }
+
+    #[test]
+    fn test_alphabetic_order_keys_allowed() {
+        let markdown = r#"```tangle://output.txt?order=abc
+First
 ```
 
-```tangle://output.txt?order=2
-Two
+```tangle://output.txt?order=xyz
+Second
 ```
 
-```tangle://output.txt?order=1
-One
+```tangle://output.txt?order=ABC
+Third
 ```"#;
 
         let blocks = Lit::parse_markdown(markdown).unwrap();
         let file_blocks = blocks.get(&PathBuf::from("output.txt")).unwrap();
+        assert_eq!(file_blocks.ordered.len(), 3);
         let content = file_blocks.to_content();
-        // Lexicographic: "1" < "10" < "2"
-        assert_eq!(content, "One\nTen\nTwo");
+        // Lexicographic: "ABC" < "abc" < "xyz"
+        assert_eq!(content, "Third\nFirst\nSecond");
     }
 }
