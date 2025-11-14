@@ -32,19 +32,6 @@ struct TangledFiles {
 }
 
 impl TangledFiles {
-    /// Create TangledFiles from a Lit instance by concatenating all snippets
-    fn from_lit(lit: &Lit) -> Self {
-        let files = lit.output
-            .iter()
-            .map(|(path, snippets)| {
-                let content = snippets.join("\n");
-                (path.clone(), content)
-            })
-            .collect();
-
-        TangledFiles { files }
-    }
-
     /// Write all tangled files to the specified output directory
     fn write_all(&self, output_dir: &PathBuf) -> Result<()> {
         for (path, content) in &self.files {
@@ -152,9 +139,22 @@ impl Lit {
         self.output.is_empty()
     }
 
+    /// Create TangledFiles by concatenating all snippets for each file
+    fn to_tangled_files(&self) -> TangledFiles {
+        let files = self.output
+            .iter()
+            .map(|(path, snippets)| {
+                let content = snippets.join("\n");
+                (path.clone(), content)
+            })
+            .collect();
+
+        TangledFiles { files }
+    }
+
     /// Tangle the code blocks and write them to the output directory
     fn tangle(&self, output_dir: &PathBuf) -> Result<()> {
-        let tangled = TangledFiles::from_lit(self);
+        let tangled = self.to_tangled_files();
         tangled.write_all(output_dir)?;
         Ok(())
     }
@@ -365,7 +365,7 @@ Line 2
 "#;
 
         let lit = Lit::from_markdown(markdown);
-        let tangled = TangledFiles::from_lit(&lit);
+        let tangled = lit.to_tangled_files();
 
         assert_eq!(tangled.len(), 1);
         assert_eq!(tangled.files.get(&PathBuf::from("output.txt")), Some(&"Line 1\nLine 2".to_string()));
@@ -385,7 +385,7 @@ Content 2
 "#;
 
         let lit = Lit::from_markdown(markdown);
-        let tangled = TangledFiles::from_lit(&lit);
+        let tangled = lit.to_tangled_files();
 
         assert_eq!(tangled.len(), 2);
         assert_eq!(tangled.files.get(&PathBuf::from("file1.txt")), Some(&"Content 1".to_string()));
