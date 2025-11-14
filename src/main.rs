@@ -1,6 +1,6 @@
 use clap::Parser;
-use color_eyre::{eyre::eyre, Result};
-use markdown::{to_mdast, ParseOptions};
+use color_eyre::{Result, eyre::eyre};
+use markdown::{ParseOptions, to_mdast};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -72,7 +72,11 @@ impl FileBlocks {
         all_blocks.sort_by(|a, b| a.0.cmp(b.0));
 
         // Extract content and join
-        all_blocks.iter().map(|(_, content)| *content).collect::<Vec<&str>>().join("\n")
+        all_blocks
+            .iter()
+            .map(|(_, content)| *content)
+            .collect::<Vec<&str>>()
+            .join("\n")
     }
 }
 
@@ -80,9 +84,13 @@ impl FileBlocks {
 #[command(name = "lit")]
 #[command(about = "A literate programming tool", long_about = None)]
 struct Args {
-    /// Directory to process
-    #[arg(value_name = "DIRECTORY")]
+    /// Input directory to process
+    #[arg(value_name = "INPUT")]
     directory: PathBuf,
+
+    /// Output directory for tangled files
+    #[arg(value_name = "OUTPUT")]
+    output: PathBuf,
 }
 
 /// Manages input and output directories for literate programming
@@ -192,10 +200,7 @@ impl Lit {
             .into_iter()
             .filter_map(|e| e.ok())
             .filter(|entry| entry.file_type().is_file())
-            .filter(|entry| {
-                entry.path().extension()
-                    .map_or(false, |ext| ext == "md")
-            })
+            .filter(|entry| entry.path().extension().map_or(false, |ext| ext == "md"))
             .try_for_each(|entry| -> Result<()> {
                 let content = fs::read_to_string(entry.path())?;
                 let blocks = Self::parse_markdown(&content)?;
@@ -248,13 +253,10 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    // For now, use a default output directory (could be made configurable)
-    let output_dir = args.directory.join("output");
-
     println!("Reading markdown files from: {}", args.directory.display());
-    println!("Writing tangled files to: {}\n", output_dir.display());
+    println!("Writing tangled files to: {}\n", args.output.display());
 
-    let lit = Lit::new(args.directory, output_dir);
+    let lit = Lit::new(args.directory, args.output);
     lit.tangle()?;
 
     println!("Tangling complete!");
@@ -281,7 +283,10 @@ fn main() {
         assert_eq!(blocks.len(), 1);
         let file_blocks = blocks.get(&PathBuf::from("src/main.rs")).unwrap();
         assert_eq!(file_blocks.unpositioned.len(), 1);
-        assert_eq!(file_blocks.unpositioned[0], "fn main() {\n    println!(\"Hello\");\n}");
+        assert_eq!(
+            file_blocks.unpositioned[0],
+            "fn main() {\n    println!(\"Hello\");\n}"
+        );
     }
 
     #[test]
@@ -303,8 +308,14 @@ code 2
         assert_eq!(blocks.len(), 2);
         assert!(blocks.contains_key(&PathBuf::from("file1.rs")));
         assert!(blocks.contains_key(&PathBuf::from("file2.rs")));
-        assert_eq!(blocks.get(&PathBuf::from("file1.rs")).unwrap().unpositioned[0], "code 1");
-        assert_eq!(blocks.get(&PathBuf::from("file2.rs")).unwrap().unpositioned[0], "code 2");
+        assert_eq!(
+            blocks.get(&PathBuf::from("file1.rs")).unwrap().unpositioned[0],
+            "code 1"
+        );
+        assert_eq!(
+            blocks.get(&PathBuf::from("file2.rs")).unwrap().unpositioned[0],
+            "code 2"
+        );
     }
 
     #[test]
@@ -324,7 +335,13 @@ let y = 10;
 
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks.get(&PathBuf::from("output.rs")).unwrap().unpositioned[0], "// This should be extracted\nlet y = 10;");
+        assert_eq!(
+            blocks
+                .get(&PathBuf::from("output.rs"))
+                .unwrap()
+                .unpositioned[0],
+            "// This should be extracted\nlet y = 10;"
+        );
     }
 
     #[test]
@@ -344,7 +361,13 @@ Top level content
 
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks.get(&PathBuf::from("top-level.txt")).unwrap().unpositioned[0], "Top level content");
+        assert_eq!(
+            blocks
+                .get(&PathBuf::from("top-level.txt"))
+                .unwrap()
+                .unpositioned[0],
+            "Top level content"
+        );
     }
 
     #[test]
@@ -365,7 +388,13 @@ Top level content
 
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks.get(&PathBuf::from("top-level.txt")).unwrap().unpositioned[0], "Top level content");
+        assert_eq!(
+            blocks
+                .get(&PathBuf::from("top-level.txt"))
+                .unwrap()
+                .unpositioned[0],
+            "Top level content"
+        );
     }
 
     #[test]
@@ -400,7 +429,13 @@ pub fn helper() {}
 
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks.get(&PathBuf::from("src/modules/utils.rs")).unwrap().unpositioned[0], "pub fn helper() {}");
+        assert_eq!(
+            blocks
+                .get(&PathBuf::from("src/modules/utils.rs"))
+                .unwrap()
+                .unpositioned[0],
+            "pub fn helper() {}"
+        );
     }
 
     #[test]
@@ -410,7 +445,13 @@ pub fn helper() {}
 
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks.get(&PathBuf::from("empty.txt")).unwrap().unpositioned[0], "");
+        assert_eq!(
+            blocks
+                .get(&PathBuf::from("empty.txt"))
+                .unwrap()
+                .unpositioned[0],
+            ""
+        );
     }
 
     #[test]
@@ -424,7 +465,10 @@ pub fn helper() {}
         let tangled = Lit::to_tangled_files(blocks);
 
         assert_eq!(tangled.len(), 1);
-        assert_eq!(tangled.files.get(&PathBuf::from("output.txt")), Some(&"Line 1\nLine 2".to_string()));
+        assert_eq!(
+            tangled.files.get(&PathBuf::from("output.txt")),
+            Some(&"Line 1\nLine 2".to_string())
+        );
     }
 
     #[test]
@@ -441,8 +485,14 @@ pub fn helper() {}
         let tangled = Lit::to_tangled_files(blocks);
 
         assert_eq!(tangled.len(), 2);
-        assert_eq!(tangled.files.get(&PathBuf::from("file1.txt")), Some(&"Content 1".to_string()));
-        assert_eq!(tangled.files.get(&PathBuf::from("file2.txt")), Some(&"Content 2".to_string()));
+        assert_eq!(
+            tangled.files.get(&PathBuf::from("file1.txt")),
+            Some(&"Content 1".to_string())
+        );
+        assert_eq!(
+            tangled.files.get(&PathBuf::from("file2.txt")),
+            Some(&"Content 2".to_string())
+        );
     }
 
     #[test]
@@ -588,7 +638,12 @@ Duplicate
 
         let result = Lit::parse_markdown(markdown);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Duplicate position key"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Duplicate position key")
+        );
     }
 
     #[test]
@@ -600,7 +655,10 @@ Duplicate
     #[test]
     fn test_parse_tangle_url_with_at() {
         let result = Lit::parse_tangle_url("tangle://path/to/file.txt?at=xyz");
-        assert_eq!(result, Some((PathBuf::from("path/to/file.txt"), Some("xyz".to_string()))));
+        assert_eq!(
+            result,
+            Some((PathBuf::from("path/to/file.txt"), Some("xyz".to_string())))
+        );
     }
 
     #[test]
@@ -623,7 +681,12 @@ Ten
 
         let result = Lit::parse_markdown(markdown);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must contain only alphabetic letters"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must contain only alphabetic letters")
+        );
     }
 
     #[test]
@@ -634,7 +697,12 @@ Mixed
 
         let result = Lit::parse_markdown(markdown);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must contain only alphabetic letters"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must contain only alphabetic letters")
+        );
     }
 
     #[test]
@@ -645,7 +713,12 @@ Special
 
         let result = Lit::parse_markdown(markdown);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must contain only alphabetic letters"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must contain only alphabetic letters")
+        );
     }
 
     #[test]
@@ -656,7 +729,12 @@ Empty
 
         let result = Lit::parse_markdown(markdown);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must not be empty"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must not be empty")
+        );
     }
 
     #[test]
@@ -667,7 +745,12 @@ Content
 
         let result = Lit::parse_markdown(markdown);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must not start with 'm' or 'M'"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must not start with 'm' or 'M'")
+        );
     }
 
     #[test]
@@ -678,7 +761,12 @@ Content
 
         let result = Lit::parse_markdown(markdown);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must not start with 'm' or 'M'"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must not start with 'm' or 'M'")
+        );
     }
 
     #[test]
@@ -689,7 +777,12 @@ Content
 
         let result = Lit::parse_markdown(markdown);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must not start with 'm' or 'M'"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must not start with 'm' or 'M'")
+        );
     }
 
     #[test]
