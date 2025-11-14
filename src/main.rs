@@ -24,16 +24,14 @@ enum PositionError {
 /// Errors that can occur when parsing a block from a markdown node
 #[derive(Debug, Error)]
 enum BlockError {
-    #[error("Node is not a Code node")]
-    NotCodeNode,
-    #[error("Code block has no language specified")]
-    NoLanguage,
-    #[error("Not a tangle URL")]
-    NotTangleUrl,
-    #[error("URL is not a tangle:// URL")]
-    NotTangleScheme,
-    #[error("Tangle URL missing host/path")]
+    #[error("Not a tangle block")]
+    NotTangleBlock,
+    #[error("Tangle URL must be hostless (use tangle:///path, not tangle://path)")]
+    InvalidTangleUrl,
+    #[error("Tangle URL missing path")]
     MissingPath,
+    #[error("Invalid tangle URL path")]
+    InvalidPath,
     #[error(transparent)]
     PositionError(#[from] PositionError),
 }
@@ -84,36 +82,34 @@ impl TryFrom<&Node> for Block {
 
     fn try_from(node: &Node) -> std::result::Result<Self, Self::Error> {
         let Node::Code(code) = node else {
-            return Err(BlockError::NotCodeNode);
+            return Err(BlockError::NotTangleBlock);
         };
 
-        let Some(lang) = &code.lang else {
-            return Err(BlockError::NoLanguage);
-        };
+        let lang = code.lang.as_ref().ok_or(BlockError::NotTangleBlock)?;
 
-        // Parse the tangle:// URL
-        let Ok(parsed) = Url::parse(lang) else {
-            return Err(BlockError::NotTangleUrl);
-        };
+        // Parse the tangle:/// URL (hostless format)
+        let parsed = Url::parse(lang).map_err(|_| BlockError::NotTangleBlock)?;
 
-        // Verify it's a tangle:// URL
+        // Check if it's a tangle URL
         if parsed.scheme() != "tangle" {
-            return Err(BlockError::NotTangleScheme);
+            return Err(BlockError::NotTangleBlock);
         }
 
-        // Get the path (host + path for URLs like tangle://path/to/file)
-        let Some(host) = parsed.host_str() else {
-            return Err(BlockError::MissingPath);
-        };
+        // Ensure it's hostless (tangle:///path, not tangle://path)
+        if parsed.host_str().is_some() {
+            return Err(BlockError::InvalidTangleUrl);
+        }
 
-        let path_str = {
-            let path = parsed.path();
-            if path.is_empty() || path == "/" {
-                host.to_string()
-            } else {
-                format!("{host}{path}")
-            }
-        };
+        // Get the path from hostless URL (tangle:///path/to/file)
+        let path = parsed.path();
+        if path.is_empty() || path == "/" {
+            return Err(BlockError::MissingPath);
+        }
+        if path.starts_with("//") {
+            return Err(BlockError::InvalidPath);
+        }
+        // Strip the single leading slash to get a relative path
+        let path_str = path.strip_prefix('/').unwrap().to_string();
 
         // Parse query parameters to extract the "at" parameter
         let position = parsed
@@ -232,12 +228,12 @@ impl Lit {
                         let file_blocks = files.entry(block.path).or_default();
                         file_blocks.add(block.position, block.content)?;
                     }
-                    Err(BlockError::PositionError(e)) => {
-                        // Propagate position errors for tangle blocks
-                        bail!(e);
-                    }
-                    Err(_) => {
+                    Err(BlockError::NotTangleBlock) => {
                         // Skip non-tangle code blocks silently
+                    }
+                    Err(e) => {
+                        // Propagate all other errors (invalid tangle URLs, bad paths, etc.)
+                        bail!(e);
                     }
                 }
             }
@@ -327,7 +323,7 @@ mod tests {
     fn test_parse_single_tangle_block() {
         let markdown = r#"# Test
 
-```tangle://src/main.rs
+```tangle:///src/main.rs
 fn main() {
     println!("Hello");
 }
@@ -348,13 +344,13 @@ fn main() {
     fn test_parse_multiple_tangle_blocks() {
         let markdown = r#"# Multiple Blocks
 
-```tangle://file1.rs
+```tangle:///file1.rs
 code 1
 ```
 
 Some text here.
 
-```tangle://file2.rs
+```tangle:///file2.rs
 code 2
 ```
 "#;
@@ -382,7 +378,7 @@ code 2
 let x = 42;
 ```
 
-```tangle://output.rs
+```tangle:///output.rs
 // This should be extracted
 let y = 10;
 ```
@@ -403,13 +399,13 @@ let y = 10;
     fn test_parse_ignore_nested_in_blockquote() {
         let markdown = r#"# Test
 
-```tangle://top-level.txt
+```tangle:///top-level.txt
 Top level content
 ```
 
 > Blockquote here
 >
-> ```tangle://nested.txt
+> ```tangle:///nested.txt
 > This should NOT be extracted
 > ```
 "#;
@@ -429,14 +425,14 @@ Top level content
     fn test_parse_ignore_nested_in_list() {
         let markdown = r#"# Test
 
-```tangle://top-level.txt
+```tangle:///top-level.txt
 Top level content
 ```
 
 - Item 1
 - Item 2
 
-  ```tangle://nested.txt
+  ```tangle:///nested.txt
   This should NOT be extracted
   ```
 "#;
@@ -478,7 +474,7 @@ More text.
 
     #[test]
     fn test_parse_subdirectory_path() {
-        let markdown = r#"```tangle://src/modules/utils.rs
+        let markdown = r#"```tangle:///src/modules/utils.rs
 pub fn helper() {}
 ```"#;
 
@@ -495,7 +491,7 @@ pub fn helper() {}
 
     #[test]
     fn test_parse_empty_tangle_block() {
-        let markdown = r#"```tangle://empty.txt
+        let markdown = r#"```tangle:///empty.txt
 ```"#;
 
         let blocks = Lit::parse_markdown(markdown).unwrap();
@@ -526,11 +522,11 @@ pub fn helper() {}
         fs::create_dir_all(&temp_input)?;
         let markdown = r#"# Test
 
-```tangle://test.txt
+```tangle:///test.txt
 Hello World
 ```
 
-```tangle://subdir/test2.txt
+```tangle:///subdir/test2.txt
 Nested file
 ```
 "#;
@@ -556,7 +552,7 @@ Nested file
 
     #[test]
     fn test_parse_block_with_at() {
-        let markdown = r#"```tangle://output.txt?at=a
+        let markdown = r#"```tangle:///output.txt?at=a
 First block
 ```"#;
 
@@ -570,15 +566,15 @@ First block
 
     #[test]
     fn test_parse_multiple_blocks_with_different_positions() {
-        let markdown = r#"```tangle://output.txt?at=c
+        let markdown = r#"```tangle:///output.txt?at=c
 Third block
 ```
 
-```tangle://output.txt?at=a
+```tangle:///output.txt?at=a
 First block
 ```
 
-```tangle://output.txt?at=b
+```tangle:///output.txt?at=b
 Second block
 ```"#;
 
@@ -590,15 +586,15 @@ Second block
 
     #[test]
     fn test_positioned_blocks_sorted_lexicographically() {
-        let markdown = r#"```tangle://output.txt?at=c
+        let markdown = r#"```tangle:///output.txt?at=c
 Third
 ```
 
-```tangle://output.txt?at=a
+```tangle:///output.txt?at=a
 First
 ```
 
-```tangle://output.txt?at=b
+```tangle:///output.txt?at=b
 Second
 ```"#;
 
@@ -610,19 +606,19 @@ Second
 
     #[test]
     fn test_positioned_blocks_around_implicit_m() {
-        let markdown = r#"```tangle://output.txt
+        let markdown = r#"```tangle:///output.txt
 Unpositioned 1
 ```
 
-```tangle://output.txt?at=a
+```tangle:///output.txt?at=a
 Before m
 ```
 
-```tangle://output.txt?at=z
+```tangle:///output.txt?at=z
 After m
 ```
 
-```tangle://output.txt
+```tangle:///output.txt
 Unpositioned 2
 ```"#;
 
@@ -638,11 +634,11 @@ Unpositioned 2
 
     #[test]
     fn test_duplicate_position_key_returns_error() {
-        let markdown = r#"```tangle://output.txt?at=a
+        let markdown = r#"```tangle:///output.txt?at=a
 First
 ```
 
-```tangle://output.txt?at=a
+```tangle:///output.txt?at=a
 Duplicate
 ```"#;
 
@@ -661,7 +657,7 @@ Duplicate
         use markdown::mdast::{Code, Node};
 
         let code = Node::Code(Code {
-            lang: Some("tangle://path/to/file.txt".to_string()),
+            lang: Some("tangle:///path/to/file.txt".to_string()),
             value: "test content".to_string(),
             meta: None,
             position: None,
@@ -678,7 +674,7 @@ Duplicate
         use markdown::mdast::{Code, Node};
 
         let code = Node::Code(Code {
-            lang: Some("tangle://path/to/file.txt?at=xyz".to_string()),
+            lang: Some("tangle:///path/to/file.txt?at=xyz".to_string()),
             value: "test content".to_string(),
             meta: None,
             position: None,
@@ -695,7 +691,7 @@ Duplicate
         use markdown::mdast::{Code, Node};
 
         let code = Node::Code(Code {
-            lang: Some("tangle://path/to/file.txt?other=value".to_string()),
+            lang: Some("tangle:///path/to/file.txt?other=value".to_string()),
             value: "test content".to_string(),
             meta: None,
             position: None,
@@ -722,8 +718,40 @@ Duplicate
     }
 
     #[test]
+    fn test_block_with_host_rejected() {
+        let markdown = r#"```tangle://path/to/file.txt
+test content
+```"#;
+
+        let result = Lit::parse_markdown(markdown);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must be hostless")
+        );
+    }
+
+    #[test]
+    fn test_block_with_double_slash_path_rejected() {
+        let markdown = r#"```tangle:////absolute/path.txt
+test content
+```"#;
+
+        let result = Lit::parse_markdown(markdown);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid tangle URL path")
+        );
+    }
+
+    #[test]
     fn test_numeric_position_keys_rejected() {
-        let markdown = r#"```tangle://output.txt?at=10
+        let markdown = r#"```tangle:///output.txt?at=10
 Ten
 ```"#;
 
@@ -739,7 +767,7 @@ Ten
 
     #[test]
     fn test_position_key_with_numbers_rejected() {
-        let markdown = r#"```tangle://output.txt?at=a1
+        let markdown = r#"```tangle:///output.txt?at=a1
 Mixed
 ```"#;
 
@@ -755,7 +783,7 @@ Mixed
 
     #[test]
     fn test_position_key_with_special_chars_rejected() {
-        let markdown = r#"```tangle://output.txt?at=a-b
+        let markdown = r#"```tangle:///output.txt?at=a-b
 Special
 ```"#;
 
@@ -771,7 +799,7 @@ Special
 
     #[test]
     fn test_empty_position_key_rejected() {
-        let markdown = r#"```tangle://output.txt?at=
+        let markdown = r#"```tangle:///output.txt?at=
 Empty
 ```"#;
 
@@ -787,7 +815,7 @@ Empty
 
     #[test]
     fn test_position_key_starting_with_m_rejected() {
-        let markdown = r#"```tangle://output.txt?at=main
+        let markdown = r#"```tangle:///output.txt?at=main
 Content
 ```"#;
 
@@ -803,7 +831,7 @@ Content
 
     #[test]
     fn test_position_key_starting_with_capital_m_rejected() {
-        let markdown = r#"```tangle://output.txt?at=Main
+        let markdown = r#"```tangle:///output.txt?at=Main
 Content
 ```"#;
 
@@ -819,7 +847,7 @@ Content
 
     #[test]
     fn test_position_key_just_m_rejected() {
-        let markdown = r#"```tangle://output.txt?at=m
+        let markdown = r#"```tangle:///output.txt?at=m
 Content
 ```"#;
 
@@ -835,15 +863,15 @@ Content
 
     #[test]
     fn test_lowercase_position_keys_allowed() {
-        let markdown = r#"```tangle://output.txt?at=abc
+        let markdown = r#"```tangle:///output.txt?at=abc
 First
 ```
 
-```tangle://output.txt?at=xyz
+```tangle:///output.txt?at=xyz
 Second
 ```
 
-```tangle://output.txt?at=def
+```tangle:///output.txt?at=def
 Third
 ```"#;
 
@@ -857,7 +885,7 @@ Third
 
     #[test]
     fn test_uppercase_position_key_rejected() {
-        let markdown = r#"```tangle://output.txt?at=ABC
+        let markdown = r#"```tangle:///output.txt?at=ABC
 Content
 ```"#;
 
@@ -873,7 +901,7 @@ Content
 
     #[test]
     fn test_mixed_case_position_key_rejected() {
-        let markdown = r#"```tangle://output.txt?at=aBc
+        let markdown = r#"```tangle:///output.txt?at=aBc
 Content
 ```"#;
 
@@ -904,7 +932,7 @@ Content
         fs::create_dir_all(&temp_input)?;
         let markdown = r#"# Test
 
-```tangle://test.txt
+```tangle:///test.txt
 Line 1
 ```
 "#;
