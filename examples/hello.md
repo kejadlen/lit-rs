@@ -43,16 +43,16 @@ version=1.0.0
 To extract these code blocks, run:
 
 ```bash
-lit examples/
+lit examples/ output/
 ```
 
-This will find all markdown files in the `examples/` directory and extract tangle blocks, showing you which files would be generated and how many lines of code each contains.
+This will find all markdown files in the `examples/` directory and extract tangle blocks to the `output/` directory.
 
 To run the generated script:
 
 ```bash
-chmod +x hello.sh
-./hello.sh
+chmod +x output/hello.sh
+output/hello.sh
 ```
 
 ## Notes
