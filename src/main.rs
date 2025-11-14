@@ -80,9 +80,13 @@ impl FileBlocks {
 #[command(name = "lit")]
 #[command(about = "A literate programming tool", long_about = None)]
 struct Args {
-    /// Directory to process
-    #[arg(value_name = "DIRECTORY")]
+    /// Input directory to process
+    #[arg(value_name = "INPUT")]
     directory: PathBuf,
+
+    /// Output directory for tangled files
+    #[arg(value_name = "OUTPUT")]
+    output: PathBuf,
 }
 
 /// Manages input and output directories for literate programming
@@ -248,13 +252,10 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    // For now, use a default output directory (could be made configurable)
-    let output_dir = args.directory.join("output");
-
     println!("Reading markdown files from: {}", args.directory.display());
-    println!("Writing tangled files to: {}\n", output_dir.display());
+    println!("Writing tangled files to: {}\n", args.output.display());
 
-    let lit = Lit::new(args.directory, output_dir);
+    let lit = Lit::new(args.directory, args.output);
     lit.tangle()?;
 
     println!("Tangling complete!");
