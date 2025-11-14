@@ -3,7 +3,7 @@ use color_eyre::{Result, eyre::ensure};
 use markdown::{ParseOptions, to_mdast};
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 use walkdir::WalkDir;
@@ -101,32 +101,6 @@ struct Lit {
     output: PathBuf,
 }
 
-/// Represents tangled files ready to be written to disk
-#[derive(Debug)]
-struct TangledFiles {
-    /// Map from file path to concatenated content
-    files: HashMap<PathBuf, String>,
-}
-
-impl TangledFiles {
-    /// Write all tangled files to the specified output directory
-    fn write_all(&self, output_dir: &Path) -> Result<()> {
-        for (path, content) in &self.files {
-            let full_path = output_dir.join(path);
-
-            // Create parent directories if they don't exist
-            if let Some(parent) = full_path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-
-            // Write the file
-            fs::write(&full_path, content)?;
-        }
-
-        Ok(())
-    }
-}
-
 impl Lit {
     /// Create a new Lit instance with input and output directories
     fn new(input: PathBuf, output: PathBuf) -> Self {
@@ -213,24 +187,23 @@ impl Lit {
         Ok(files)
     }
 
-    /// Create TangledFiles by concatenating all snippets for each file
-    fn to_tangled_files(blocks: HashMap<PathBuf, FileBlocks>) -> TangledFiles {
-        let files = blocks
-            .iter()
-            .map(|(path, file_blocks)| {
-                let content = file_blocks.to_content();
-                (path.clone(), content)
-            })
-            .collect();
-
-        TangledFiles { files }
-    }
-
     /// Tangle the code blocks: read from input, parse, and write to output
     fn tangle(&self) -> Result<()> {
         let blocks = self.read_blocks()?;
-        let tangled = Self::to_tangled_files(blocks);
-        tangled.write_all(&self.output)?;
+
+        for (path, file_blocks) in blocks {
+            let content = file_blocks.to_content();
+            let full_path = self.output.join(path);
+
+            // Create parent directories if they don't exist
+            if let Some(parent) = full_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+
+            // Write the file
+            fs::write(&full_path, content)?;
+        }
+
         Ok(())
     }
 }
@@ -446,47 +419,6 @@ pub fn helper() {}
                 .unwrap()
                 .unpositioned[0],
             ""
-        );
-    }
-
-    #[test]
-    fn test_to_tangled_files_concatenates_snippets() {
-        let mut blocks = HashMap::new();
-        let mut file_blocks = FileBlocks::default();
-        file_blocks.add_unpositioned("Line 1".to_string());
-        file_blocks.add_unpositioned("Line 2".to_string());
-        blocks.insert(PathBuf::from("output.txt"), file_blocks);
-
-        let tangled = Lit::to_tangled_files(blocks);
-
-        assert_eq!(tangled.files.len(), 1);
-        assert_eq!(
-            tangled.files.get(&PathBuf::from("output.txt")),
-            Some(&"Line 1\n\nLine 2\n".to_string())
-        );
-    }
-
-    #[test]
-    fn test_to_tangled_files_multiple_files() {
-        let mut blocks = HashMap::new();
-        let mut file_blocks1 = FileBlocks::default();
-        file_blocks1.add_unpositioned("Content 1".to_string());
-        blocks.insert(PathBuf::from("file1.txt"), file_blocks1);
-
-        let mut file_blocks2 = FileBlocks::default();
-        file_blocks2.add_unpositioned("Content 2".to_string());
-        blocks.insert(PathBuf::from("file2.txt"), file_blocks2);
-
-        let tangled = Lit::to_tangled_files(blocks);
-
-        assert_eq!(tangled.files.len(), 2);
-        assert_eq!(
-            tangled.files.get(&PathBuf::from("file1.txt")),
-            Some(&"Content 1\n".to_string())
-        );
-        assert_eq!(
-            tangled.files.get(&PathBuf::from("file2.txt")),
-            Some(&"Content 2\n".to_string())
         );
     }
 
