@@ -204,7 +204,7 @@ impl Lit {
             .into_iter()
             .map(|(path, mut blocks)| {
                 blocks.sort();
-                TangledFile { path, blocks }
+                TangledFile::new(path, blocks)
             })
             .collect())
     }
@@ -223,6 +223,11 @@ pub struct TangledFile {
 }
 
 impl TangledFile {
+    pub fn new(path: PathBuf, blocks: Vec<Block>) -> Self {
+        assert!(blocks.is_sorted(), "blocks must be sorted by position");
+        TangledFile { path, blocks }
+    }
+
     pub fn render(&self) -> String {
         let content = self
             .blocks
@@ -478,6 +483,24 @@ Line 1
         fs::remove_dir_all(&temp_output)?;
 
         Ok(())
+    }
+
+    #[test]
+    #[should_panic(expected = "blocks must be sorted by position")]
+    fn test_tangled_file_new_panics_on_unsorted_blocks() {
+        let block1 = Block {
+            path: PathBuf::from("test.txt"),
+            position: Position::try_from("z".to_string()).unwrap(),
+            content: "last".to_string(),
+        };
+        let block2 = Block {
+            path: PathBuf::from("test.txt"),
+            position: Position::try_from("a".to_string()).unwrap(),
+            content: "first".to_string(),
+        };
+
+        // blocks are intentionally unsorted (z before a)
+        TangledFile::new(PathBuf::from("test.txt"), vec![block1, block2]);
     }
 
     #[test]
