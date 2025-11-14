@@ -1,6 +1,6 @@
 use clap::Parser;
-use color_eyre::{eyre::bail, eyre::ensure, Result};
-use markdown::{mdast::Node, ParseOptions, to_mdast};
+use color_eyre::{Result, eyre::bail, eyre::ensure};
+use markdown::{ParseOptions, mdast::Node, to_mdast};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -686,10 +686,7 @@ Duplicate
 
         let block = Block::try_from(&code).unwrap();
         assert_eq!(block.path, PathBuf::from("path/to/file.txt"));
-        assert_eq!(
-            block.position.as_ref().map(|p| p.as_ref()),
-            Some("xyz")
-        );
+        assert_eq!(block.position.as_ref().map(|p| p.as_ref()), Some("xyz"));
         assert_eq!(block.content, "test content");
     }
 
