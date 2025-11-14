@@ -156,7 +156,8 @@ impl TangledFile {
         self.blocks.sort();
 
         // Concatenate content
-        let content = self.blocks
+        let content = self
+            .blocks
             .iter()
             .map(|b| b.content.as_str())
             .collect::<Vec<_>>()
@@ -206,7 +207,7 @@ impl Lit {
         // Extract snippets from top-level code blocks only
         root.children
             .iter()
-            .map(|child| Block::try_from(child))
+            .map(Block::try_from)
             .filter_map(|result| match result {
                 Ok(block) => Some(Ok(block)),
                 Err(BlockError::NotTangleBlock) => None,
@@ -244,21 +245,19 @@ impl Lit {
         let files = self.read_blocks()?;
 
         // Process each file using try_for_each
-        files
-            .into_iter()
-            .try_for_each(|mut file| -> Result<()> {
-                // Render the content
-                let content = file.render();
+        files.into_iter().try_for_each(|mut file| -> Result<()> {
+            // Render the content
+            let content = file.render();
 
-                // Write to file
-                let full_path = self.output.join(&file.path);
-                if let Some(parent) = full_path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                fs::write(&full_path, content)?;
+            // Write to file
+            let full_path = self.output.join(&file.path);
+            if let Some(parent) = full_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&full_path, content)?;
 
-                Ok(())
-            })
+            Ok(())
+        })
     }
 }
 
