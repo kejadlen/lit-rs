@@ -1,6 +1,7 @@
 use clap::Parser;
 use color_eyre::Result;
 use markdown::{to_mdast, ParseOptions};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use walkdir::WalkDir;
@@ -14,39 +15,32 @@ struct Args {
     directory: PathBuf,
 }
 
-/// Represents a single tangle block extracted from markdown
-#[derive(Debug, Clone, PartialEq)]
-struct Block {
-    /// The file path where this code should be written
-    path: PathBuf,
-    /// The code content
-    content: String,
-}
-
-/// Manages tangle blocks and owns their content strings
+/// Manages tangle blocks grouped by file path
 #[derive(Debug)]
 struct SnippetsManager {
-    /// Blocks extracted from the markdown
-    blocks: Vec<Block>,
+    /// Map from file path to list of content snippets for that file
+    files: HashMap<PathBuf, Vec<String>>,
 }
 
 impl SnippetsManager {
-    /// Create an iterator over snippets with borrowed content
+    /// Create an iterator over all snippets with borrowed content
     fn iter(&self) -> impl Iterator<Item = Snippet<'_>> + '_ {
-        self.blocks.iter().map(|block| Snippet {
-            path: &block.path,
-            content: &block.content,
+        self.files.iter().flat_map(|(path, contents)| {
+            contents.iter().map(move |content| Snippet {
+                path,
+                content: content.as_str(),
+            })
         })
     }
 
-    /// Get the number of snippets
+    /// Get the total number of snippets across all files
     fn len(&self) -> usize {
-        self.blocks.len()
+        self.files.values().map(|v| v.len()).sum()
     }
 
     /// Check if there are no snippets
     fn is_empty(&self) -> bool {
-        self.blocks.is_empty()
+        self.files.is_empty()
     }
 }
 
@@ -72,10 +66,10 @@ fn parse_tangle_blocks(markdown_text: &str) -> SnippetsManager {
     // Parse markdown to AST
     let ast = match to_mdast(markdown_text, &ParseOptions::default()) {
         Ok(ast) => ast,
-        Err(_) => return SnippetsManager { blocks: Vec::new() },
+        Err(_) => return SnippetsManager { files: HashMap::new() },
     };
 
-    let mut blocks = Vec::new();
+    let mut files: HashMap<PathBuf, Vec<String>> = HashMap::new();
 
     // Extract snippets from top-level code blocks only
     if let Node::Root(root) = ast {
@@ -83,17 +77,17 @@ fn parse_tangle_blocks(markdown_text: &str) -> SnippetsManager {
             if let Node::Code(code) = child {
                 if let Some(lang) = &code.lang {
                     if let Some(path_str) = lang.strip_prefix("tangle://") {
-                        blocks.push(Block {
-                            path: PathBuf::from(path_str),
-                            content: code.value.clone(),
-                        });
+                        files
+                            .entry(PathBuf::from(path_str))
+                            .or_insert_with(Vec::new)
+                            .push(code.value.clone());
                     }
                 }
             }
         }
     }
 
-    SnippetsManager { blocks }
+    SnippetsManager { files }
 }
 
 fn main() -> Result<()> {
@@ -181,10 +175,9 @@ code 2
         assert_eq!(manager.len(), 2);
 
         let snippets: Vec<_> = manager.iter().collect();
-        assert_eq!(snippets[0].path, &PathBuf::from("file1.rs"));
-        assert_eq!(snippets[0].content, "code 1");
-        assert_eq!(snippets[1].path, &PathBuf::from("file2.rs"));
-        assert_eq!(snippets[1].content, "code 2");
+        // HashMap doesn't guarantee order, so check both snippets exist
+        assert!(snippets.iter().any(|s| s.path == &PathBuf::from("file1.rs") && s.content == "code 1"));
+        assert!(snippets.iter().any(|s| s.path == &PathBuf::from("file2.rs") && s.content == "code 2"));
     }
 
     #[test]
