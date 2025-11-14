@@ -4,30 +4,59 @@ use markdown::{mdast::Node, ParseOptions, to_mdast};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use thiserror::Error;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 use url::Url;
 use walkdir::WalkDir;
+
+/// Errors that can occur when validating a position key
+#[derive(Debug, Error)]
+enum PositionError {
+    #[error("Position key must not be empty")]
+    Empty,
+    #[error("Position key '{0}' must contain only lowercase letters")]
+    InvalidCharacters(String),
+    #[error("Position key '{0}' must not start with 'm'")]
+    StartsWithM(String),
+}
+
+/// Errors that can occur when parsing a block from a markdown node
+#[derive(Debug, Error)]
+enum BlockError {
+    #[error("Node is not a Code node")]
+    NotCodeNode,
+    #[error("Code block has no language specified")]
+    NoLanguage,
+    #[error("Not a tangle URL")]
+    NotTangleUrl,
+    #[error("URL is not a tangle:// URL")]
+    NotTangleScheme,
+    #[error("Tangle URL missing host/path")]
+    MissingPath,
+    #[error(transparent)]
+    PositionError(#[from] PositionError),
+}
 
 /// Represents a validated position key for ordering blocks
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct Position(String);
 
 impl TryFrom<String> for Position {
-    type Error = color_eyre::Report;
+    type Error = PositionError;
 
-    fn try_from(value: String) -> Result<Self> {
-        ensure!(!value.is_empty(), "Position key must not be empty");
+    fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
+        if value.is_empty() {
+            return Err(PositionError::Empty);
+        }
 
-        ensure!(
-            value.chars().all(|c| c.is_ascii_lowercase()),
-            "Position key '{value}' must contain only lowercase letters"
-        );
+        if !value.chars().all(|c| c.is_ascii_lowercase()) {
+            return Err(PositionError::InvalidCharacters(value));
+        }
 
-        ensure!(
-            !value.starts_with('m'),
-            "Position key '{value}' must not start with 'm'"
-        );
+        if value.starts_with('m') {
+            return Err(PositionError::StartsWithM(value));
+        }
 
         Ok(Position(value))
     }
@@ -51,28 +80,30 @@ struct Block {
 }
 
 impl TryFrom<&Node> for Block {
-    type Error = color_eyre::Report;
+    type Error = BlockError;
 
-    fn try_from(node: &Node) -> Result<Self> {
+    fn try_from(node: &Node) -> std::result::Result<Self, Self::Error> {
         let Node::Code(code) = node else {
-            bail!("Node is not a Code node");
+            return Err(BlockError::NotCodeNode);
         };
 
         let Some(lang) = &code.lang else {
-            bail!("Code block has no language specified");
+            return Err(BlockError::NoLanguage);
         };
 
         // Parse the tangle:// URL
         let Ok(parsed) = Url::parse(lang) else {
-            bail!("Not a tangle URL");
+            return Err(BlockError::NotTangleUrl);
         };
 
         // Verify it's a tangle:// URL
-        ensure!(parsed.scheme() == "tangle", "URL is not a tangle:// URL");
+        if parsed.scheme() != "tangle" {
+            return Err(BlockError::NotTangleScheme);
+        }
 
         // Get the path (host + path for URLs like tangle://path/to/file)
         let Some(host) = parsed.host_str() else {
-            bail!("Tangle URL missing host/path");
+            return Err(BlockError::MissingPath);
         };
 
         let path_str = {
@@ -201,12 +232,12 @@ impl Lit {
                         let file_blocks = files.entry(block.path).or_default();
                         file_blocks.add(block.position, block.content)?;
                     }
-                    Err(e) => {
-                        // Only propagate errors for tangle blocks with invalid positions
+                    Err(BlockError::PositionError(e)) => {
+                        // Propagate position errors for tangle blocks
+                        bail!(e);
+                    }
+                    Err(_) => {
                         // Skip non-tangle code blocks silently
-                        if e.to_string().contains("Position key") {
-                            return Err(e);
-                        }
                     }
                 }
             }
