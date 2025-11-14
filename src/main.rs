@@ -1,6 +1,6 @@
 use clap::Parser;
-use color_eyre::{Result, eyre::ensure};
-use markdown::{ParseOptions, to_mdast};
+use color_eyre::{Result, eyre::bail, eyre::ensure};
+use markdown::{ParseOptions, mdast::Node, to_mdast};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -8,6 +8,65 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 use url::Url;
 use walkdir::WalkDir;
+
+/// Represents a single tangle block from markdown
+#[derive(Debug, Clone)]
+struct Block {
+    /// The file path to write this block to
+    path: PathBuf,
+    /// Optional position key for ordering
+    position: Option<String>,
+    /// The content of the code block
+    content: String,
+}
+
+impl TryFrom<&Node> for Block {
+    type Error = color_eyre::Report;
+
+    fn try_from(node: &Node) -> Result<Self> {
+        let Node::Code(code) = node else {
+            bail!("Node is not a Code node");
+        };
+
+        let Some(lang) = &code.lang else {
+            bail!("Code block has no language specified");
+        };
+
+        // Parse the tangle:// URL
+        let Ok(parsed) = Url::parse(lang) else {
+            bail!("Not a tangle URL");
+        };
+
+        // Verify it's a tangle:// URL
+        ensure!(parsed.scheme() == "tangle", "URL is not a tangle:// URL");
+
+        // Get the path (host + path for URLs like tangle://path/to/file)
+        let Some(host) = parsed.host_str() else {
+            bail!("Tangle URL missing host/path");
+        };
+
+        let path_str = {
+            let path = parsed.path();
+            if path.is_empty() || path == "/" {
+                host.to_string()
+            } else {
+                format!("{host}{path}")
+            }
+        };
+
+        // Parse query parameters to extract the "at" parameter
+        let position = parsed
+            .query_pairs()
+            .find(|(key, _)| key == "at")
+            .map(|(_, value)| value.to_string());
+
+        Ok(Block {
+            path: PathBuf::from(path_str),
+            position,
+            content: code.value.clone(),
+        })
+    }
+}
 
 /// Represents blocks for a single file, with positioned and unpositioned blocks separated
 #[derive(Debug, Default)]
@@ -104,48 +163,8 @@ impl Lit {
         Lit { input, output }
     }
 
-    /// Parse a tangle:// URL to extract the path and optional at parameter
-    /// Returns (path, at) where at is Some(position_key) if present
-    fn parse_tangle_url(url: &str) -> Option<(PathBuf, Option<String>)> {
-        // Parse the URL using the url crate
-        let parsed = Url::parse(url).ok()?;
-
-        // Verify it's a tangle:// URL
-        if parsed.scheme() != "tangle" {
-            return None;
-        }
-
-        // Get the path (host + path for URLs like tangle://path/to/file)
-        // The url crate treats tangle://path as having host="path"
-        let path_str = if parsed.host_str().is_some() {
-            // For URLs like tangle://file.txt or tangle://path/to/file.txt
-            // We need to combine host and path
-            let host = parsed.host_str()?;
-            let path = parsed.path();
-            if path.is_empty() || path == "/" {
-                host.to_string()
-            } else {
-                // path already starts with '/', so just concatenate
-                format!("{host}{path}")
-            }
-        } else {
-            // Fallback to just the path
-            parsed.path().trim_start_matches('/').to_string()
-        };
-
-        // Parse query parameters to extract the "at" parameter
-        let at = parsed
-            .query_pairs()
-            .find(|(key, _)| key == "at")
-            .map(|(_, value)| value.to_string());
-
-        Some((PathBuf::from(path_str), at))
-    }
-
     /// Parse markdown content and extract code blocks with tangle:// paths
     fn parse_markdown(markdown_text: &str) -> Result<HashMap<PathBuf, FileBlocks>> {
-        use markdown::mdast::Node;
-
         let ast = match to_mdast(markdown_text, &ParseOptions::default()) {
             Ok(ast) => ast,
             Err(_) => return Ok(HashMap::new()),
@@ -156,12 +175,9 @@ impl Lit {
         // Extract snippets from top-level code blocks only
         if let Node::Root(root) = ast {
             for child in &root.children {
-                if let Node::Code(code) = child
-                    && let Some(lang) = &code.lang
-                    && let Some((path, at)) = Self::parse_tangle_url(lang)
-                {
-                    let file_blocks = files.entry(path).or_default();
-                    file_blocks.add(at, code.value.clone())?;
+                if let Ok(block) = Block::try_from(child) {
+                    let file_blocks = files.entry(block.path).or_default();
+                    file_blocks.add(block.position, block.content)?;
                 }
             }
         }
@@ -580,30 +596,68 @@ Duplicate
     }
 
     #[test]
-    fn test_parse_tangle_url_without_at() {
-        let result = Lit::parse_tangle_url("tangle://path/to/file.txt");
-        assert_eq!(result, Some((PathBuf::from("path/to/file.txt"), None)));
+    fn test_block_from_node_without_at() {
+        use markdown::mdast::{Code, Node};
+
+        let code = Node::Code(Code {
+            lang: Some("tangle://path/to/file.txt".to_string()),
+            value: "test content".to_string(),
+            meta: None,
+            position: None,
+        });
+
+        let block = Block::try_from(&code).unwrap();
+        assert_eq!(block.path, PathBuf::from("path/to/file.txt"));
+        assert_eq!(block.position, None);
+        assert_eq!(block.content, "test content");
     }
 
     #[test]
-    fn test_parse_tangle_url_with_at() {
-        let result = Lit::parse_tangle_url("tangle://path/to/file.txt?at=xyz");
-        assert_eq!(
-            result,
-            Some((PathBuf::from("path/to/file.txt"), Some("xyz".to_string())))
-        );
+    fn test_block_from_node_with_at() {
+        use markdown::mdast::{Code, Node};
+
+        let code = Node::Code(Code {
+            lang: Some("tangle://path/to/file.txt?at=xyz".to_string()),
+            value: "test content".to_string(),
+            meta: None,
+            position: None,
+        });
+
+        let block = Block::try_from(&code).unwrap();
+        assert_eq!(block.path, PathBuf::from("path/to/file.txt"));
+        assert_eq!(block.position, Some("xyz".to_string()));
+        assert_eq!(block.content, "test content");
     }
 
     #[test]
-    fn test_parse_tangle_url_with_query_but_no_at() {
-        let result = Lit::parse_tangle_url("tangle://path/to/file.txt?other=value");
-        assert_eq!(result, Some((PathBuf::from("path/to/file.txt"), None)));
+    fn test_block_from_node_with_query_but_no_at() {
+        use markdown::mdast::{Code, Node};
+
+        let code = Node::Code(Code {
+            lang: Some("tangle://path/to/file.txt?other=value".to_string()),
+            value: "test content".to_string(),
+            meta: None,
+            position: None,
+        });
+
+        let block = Block::try_from(&code).unwrap();
+        assert_eq!(block.path, PathBuf::from("path/to/file.txt"));
+        assert_eq!(block.position, None);
     }
 
     #[test]
-    fn test_parse_tangle_url_non_tangle() {
-        let result = Lit::parse_tangle_url("rust");
-        assert_eq!(result, None);
+    fn test_block_from_node_non_tangle() {
+        use markdown::mdast::{Code, Node};
+
+        let code = Node::Code(Code {
+            lang: Some("rust".to_string()),
+            value: "test content".to_string(),
+            meta: None,
+            position: None,
+        });
+
+        let result = Block::try_from(&code);
+        assert!(result.is_err());
     }
 
     #[test]
