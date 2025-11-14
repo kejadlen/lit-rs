@@ -14,43 +14,43 @@ struct Args {
     directory: PathBuf,
 }
 
-/// Represents a file to be tangled with its path and content
+/// Represents a single tangle block extracted from markdown
 #[derive(Debug, Clone, PartialEq)]
-struct File {
+struct Block {
     /// The file path where this code should be written
     path: PathBuf,
     /// The code content
     content: String,
 }
 
-/// Manages snippets and owns their content strings
+/// Manages tangle blocks and owns their content strings
 #[derive(Debug)]
 struct SnippetsManager {
-    /// Files extracted from the markdown
-    files: Vec<File>,
+    /// Blocks extracted from the markdown
+    blocks: Vec<Block>,
 }
 
 impl SnippetsManager {
     /// Create an iterator over snippets with borrowed content
     fn iter(&self) -> impl Iterator<Item = Snippet<'_>> + '_ {
-        self.files.iter().map(|file| Snippet {
-            path: &file.path,
-            content: &file.content,
+        self.blocks.iter().map(|block| Snippet {
+            path: &block.path,
+            content: &block.content,
         })
     }
 
     /// Get the number of snippets
     fn len(&self) -> usize {
-        self.files.len()
+        self.blocks.len()
     }
 
     /// Check if there are no snippets
     fn is_empty(&self) -> bool {
-        self.files.is_empty()
+        self.blocks.is_empty()
     }
 }
 
-/// Represents a code snippet with a tangle path (borrowed view of a File)
+/// Represents a borrowed view of a Block
 #[derive(Debug, Clone, PartialEq)]
 struct Snippet<'a> {
     /// The file path where this code should be written
@@ -72,10 +72,10 @@ fn parse_tangle_blocks(markdown_text: &str) -> SnippetsManager {
     // Parse markdown to AST
     let ast = match to_mdast(markdown_text, &ParseOptions::default()) {
         Ok(ast) => ast,
-        Err(_) => return SnippetsManager { files: Vec::new() },
+        Err(_) => return SnippetsManager { blocks: Vec::new() },
     };
 
-    let mut files = Vec::new();
+    let mut blocks = Vec::new();
 
     // Extract snippets from top-level code blocks only
     if let Node::Root(root) = ast {
@@ -83,7 +83,7 @@ fn parse_tangle_blocks(markdown_text: &str) -> SnippetsManager {
             if let Node::Code(code) = child {
                 if let Some(lang) = &code.lang {
                     if let Some(path_str) = lang.strip_prefix("tangle://") {
-                        files.push(File {
+                        blocks.push(Block {
                             path: PathBuf::from(path_str),
                             content: code.value.clone(),
                         });
@@ -93,7 +93,7 @@ fn parse_tangle_blocks(markdown_text: &str) -> SnippetsManager {
         }
     }
 
-    SnippetsManager { files }
+    SnippetsManager { blocks }
 }
 
 fn main() -> Result<()> {
