@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use thiserror::Error;
+use tracing::info;
 use url::Url;
 use walkdir::WalkDir;
 
@@ -238,6 +239,7 @@ impl Lit {
             if let Some(parent) = full_path.parent() {
                 fs::create_dir_all(parent)?;
             }
+            info!("Writing {}", full_path.display());
             fs::write(&full_path, content)?;
 
             Ok(())
