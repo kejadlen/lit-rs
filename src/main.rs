@@ -25,16 +25,13 @@ impl FileBlocks {
     fn add(&mut self, at: Option<String>, content: String) -> Result<()> {
         match at {
             Some(at) => {
-                // Validate that position key is not empty
                 ensure!(!at.is_empty(), "Position key must not be empty");
 
-                // Validate that position key only contains lowercase letters
                 ensure!(
                     at.chars().all(|c| c.is_ascii_lowercase()),
                     "Position key '{at}' must contain only lowercase letters"
                 );
 
-                // Disallow position keys starting with 'm'
                 ensure!(
                     !at.starts_with('m'),
                     "Position key '{at}' must not start with 'm'"
@@ -56,10 +53,8 @@ impl FileBlocks {
     /// Get the concatenated content with blocks sorted lexicographically by position key.
     /// Unpositioned blocks are implicitly sorted at position "m".
     fn to_content(&self) -> String {
-        // Collect all blocks with their effective sort keys
         let mut all_blocks: Vec<(&str, &str)> = Vec::new();
 
-        // Add positioned blocks with their explicit keys
         for (at, content) in &self.positioned {
             all_blocks.push((at.as_str(), content.as_str()));
         }
@@ -69,10 +64,8 @@ impl FileBlocks {
             all_blocks.push(("m", content.as_str()));
         }
 
-        // Sort by position key lexicographically
         all_blocks.sort_by(|a, b| a.0.cmp(b.0));
 
-        // Extract content and join with trailing newline
         let content = all_blocks
             .iter()
             .map(|(_, content)| *content)
@@ -153,7 +146,6 @@ impl Lit {
     fn parse_markdown(markdown_text: &str) -> Result<HashMap<PathBuf, FileBlocks>> {
         use markdown::mdast::Node;
 
-        // Parse markdown to AST
         let ast = match to_mdast(markdown_text, &ParseOptions::default()) {
             Ok(ast) => ast,
             Err(_) => return Ok(HashMap::new()),
@@ -190,16 +182,13 @@ impl Lit {
                 let content = fs::read_to_string(entry.path())?;
                 let blocks = Self::parse_markdown(&content)?;
 
-                // Merge the parsed blocks into our files HashMap
                 for (path, file_blocks) in blocks {
                     let target = files.entry(path).or_default();
 
-                    // Add positioned blocks
                     for (at, content) in file_blocks.positioned {
                         target.add(Some(at), content)?;
                     }
 
-                    // Add unpositioned blocks
                     for content in file_blocks.unpositioned {
                         target.add(None, content)?;
                     }
@@ -218,12 +207,10 @@ impl Lit {
             let content = file_blocks.to_content();
             let full_path = self.output.join(path);
 
-            // Create parent directories if they don't exist
             if let Some(parent) = full_path.parent() {
                 fs::create_dir_all(parent)?;
             }
 
-            // Write the file
             fs::write(&full_path, content)?;
         }
 
@@ -449,11 +436,9 @@ pub fn helper() {}
     fn test_tangle_end_to_end() -> Result<()> {
         use std::env;
 
-        // Create a temporary input directory with markdown files
         let temp_input = env::temp_dir().join("lit-test-input");
         let temp_output = env::temp_dir().join("lit-test-output");
 
-        // Clean up if they exist
         if temp_input.exists() {
             fs::remove_dir_all(&temp_input)?;
         }
@@ -461,7 +446,6 @@ pub fn helper() {}
             fs::remove_dir_all(&temp_output)?;
         }
 
-        // Create input directory and markdown file
         fs::create_dir_all(&temp_input)?;
         let markdown = r#"# Test
 
@@ -475,22 +459,18 @@ Nested file
 "#;
         fs::write(temp_input.join("test.md"), markdown)?;
 
-        // Create Lit and tangle
         let lit = Lit::new(temp_input.clone(), temp_output.clone());
         lit.tangle()?;
 
-        // Verify the files were created
         assert!(temp_output.join("test.txt").exists());
         assert!(temp_output.join("subdir/test2.txt").exists());
 
-        // Verify the content
         let content1 = fs::read_to_string(temp_output.join("test.txt"))?;
         assert_eq!(content1, "Hello World\n");
 
         let content2 = fs::read_to_string(temp_output.join("subdir/test2.txt"))?;
         assert_eq!(content2, "Nested file\n");
 
-        // Clean up
         fs::remove_dir_all(&temp_input)?;
         fs::remove_dir_all(&temp_output)?;
 
@@ -796,11 +776,9 @@ Content
     fn test_tangled_files_end_with_newline() -> Result<()> {
         use std::env;
 
-        // Create a temporary input directory with markdown files
         let temp_input = env::temp_dir().join("lit-test-newline-input");
         let temp_output = env::temp_dir().join("lit-test-newline-output");
 
-        // Clean up if they exist
         if temp_input.exists() {
             fs::remove_dir_all(&temp_input)?;
         }
@@ -808,7 +786,6 @@ Content
             fs::remove_dir_all(&temp_output)?;
         }
 
-        // Create input directory and markdown file
         fs::create_dir_all(&temp_input)?;
         let markdown = r#"# Test
 
@@ -818,18 +795,15 @@ Line 1
 "#;
         fs::write(temp_input.join("test.md"), markdown)?;
 
-        // Create Lit and tangle
         let lit = Lit::new(temp_input.clone(), temp_output.clone());
         lit.tangle()?;
 
-        // Verify the file ends with a newline
         let content = fs::read_to_string(temp_output.join("test.txt"))?;
         assert!(
             content.ends_with('\n'),
             "Tangled file should end with a newline"
         );
 
-        // Clean up
         fs::remove_dir_all(&temp_input)?;
         fs::remove_dir_all(&temp_output)?;
 

@@ -3,13 +3,11 @@ use tempfile::TempDir;
 
 #[test]
 fn test_golden_path() {
-    // Create temporary directories
     let temp_dir = TempDir::new().unwrap();
     let input_dir = temp_dir.path().join("input");
     let output_dir = temp_dir.path().join("output");
     fs::create_dir_all(&input_dir).unwrap();
 
-    // Create markdown file with tangle blocks
     let markdown = r#"# Example Project
 
 This is a simple example demonstrating literate programming.
@@ -62,23 +60,20 @@ pub fn greet() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    // Verify output files exist
     assert!(output_dir.join("main.rs").exists());
     assert!(output_dir.join("config.toml").exists());
     assert!(output_dir.join("lib.rs").exists());
 
-    // Verify content of main.rs
     let main_content = fs::read_to_string(output_dir.join("main.rs")).unwrap();
     assert_eq!(
         main_content,
         "fn main() {\n    println!(\"Hello, World!\");\n}\n"
     );
 
-    // Verify content of config.toml
     let config_content = fs::read_to_string(output_dir.join("config.toml")).unwrap();
     assert_eq!(config_content, "name = \"example\"\nversion = \"1.0.0\"\n");
 
-    // Verify content of lib.rs (blocks ordered: a, m, z)
+    // blocks ordered: a, m, z
     let lib_content = fs::read_to_string(output_dir.join("lib.rs")).unwrap();
     assert_eq!(
         lib_content,
