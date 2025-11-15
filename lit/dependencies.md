@@ -10,7 +10,8 @@ Key dependencies include:
 - `z3` for constraint solving
 
 ```tangle:///src/lib.rs?id=imports&first
-use color_eyre::{Result, eyre::bail};
+use color_eyre::Result;
+use color_eyre::eyre::{bail, eyre};
 use markdown::{ParseOptions, mdast::Node, to_mdast};
 use regex::Regex;
 use std::collections::{HashMap, HashSet};

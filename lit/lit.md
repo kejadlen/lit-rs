@@ -57,7 +57,7 @@ blocks in quotes or lists).
     /// Parse markdown content and extract code blocks with tangle:// paths
     pub fn parse_markdown(markdown_text: &str) -> Result<Vec<Block>> {
         let ast = to_mdast(markdown_text, &ParseOptions::default())
-            .map_err(|e| color_eyre::eyre::eyre!("Failed to parse markdown: {}", e))?;
+            .map_err(|e| eyre!("Failed to parse markdown: {}", e))?;
 
         let Node::Root(root) = ast else {
             bail!("Expected root node in markdown AST");
