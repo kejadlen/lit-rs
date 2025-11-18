@@ -544,7 +544,8 @@ Second block
 
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 3);
-        assert!(blocks.iter().all(|b| b.path == PathBuf::from("output.txt")));
+        let output_path = PathBuf::from("output.txt");
+        assert!(blocks.iter().all(|b| b.path == output_path));
         assert!(blocks.iter().all(|b| b.position.as_ref() != "m"));
     }
 
