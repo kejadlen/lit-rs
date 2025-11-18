@@ -29,18 +29,18 @@ version = "1.0.0"
 
 ## Multiple blocks for same file
 
-```tangle:///lib.rs?at=z
+```tangle:///lib.rs?id=footer&last
 // Footer comment
 ```
 
-```tangle:///lib.rs
+```tangle:///lib.rs?id=main&after=header&before=footer
 // Main content
 pub fn greet() {
     println!("Hello!");
 }
 ```
 
-```tangle:///lib.rs?at=a
+```tangle:///lib.rs?id=header&first
 // Header comment
 ```
 "#;

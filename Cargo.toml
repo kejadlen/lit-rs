@@ -7,11 +7,13 @@ edition = "2024"
 clap = { version = "*", features = ["derive"] }
 color-eyre = "*"
 markdown = "*"
+regex = "*"
 thiserror = "*"
 tracing = "*"
 tracing-subscriber = { version = "*", features = ["env-filter"] }
 url = "*"
 walkdir = "*"
+z3 = { version = "*", features = ["static-link-z3"] }
 
 [dev-dependencies]
 tempfile = "*"
