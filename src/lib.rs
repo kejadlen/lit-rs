@@ -1,15 +1,17 @@
 use color_eyre::{Result, eyre::bail};
 use markdown::{ParseOptions, mdast::Node, to_mdast};
-use std::collections::HashMap;
+use regex::Regex;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::LazyLock;
 use thiserror::Error;
 use tracing::info;
 use url::Url;
 use walkdir::WalkDir;
 
 /// Represents a validated position key for ordering blocks
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Position(String);
 
 impl Position {
@@ -51,6 +53,22 @@ pub enum PositionError {
     InvalidCharacters(String),
 }
 
+/// Regex pattern for matching {{include:position}} markers
+static INCLUDE_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\{\{include:([a-z]+)\}\}").expect("Invalid regex pattern")
+});
+
+/// Extract all inclusion positions from content
+fn extract_inclusions(content: &str) -> std::result::Result<Vec<Position>, PositionError> {
+    INCLUDE_PATTERN
+        .captures_iter(content)
+        .map(|cap| {
+            let pos_str = cap.get(1).unwrap().as_str().to_string();
+            Position::try_from(pos_str)
+        })
+        .collect()
+}
+
 /// Represents a single tangle block from markdown
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block {
@@ -60,6 +78,8 @@ pub struct Block {
     pub position: Position,
     /// The content of the code block
     pub content: String,
+    /// Positions of blocks to include within this block
+    pub includes: Vec<Position>,
 }
 
 impl PartialOrd for Block {
@@ -116,10 +136,14 @@ impl TryFrom<&Node> for Block {
             .transpose()?
             .unwrap_or_else(Position::middle);
 
+        // Extract inclusion markers from content
+        let includes = extract_inclusions(&code.value)?;
+
         Ok(Block {
             path: PathBuf::from(path_str),
             position,
             content: code.value.clone(),
+            includes,
         })
     }
 }
@@ -139,6 +163,15 @@ pub enum BlockError {
     PositionError(#[from] PositionError),
 }
 
+/// Errors that can occur when rendering tangled files with inclusions
+#[derive(Debug, Error)]
+pub enum RenderError {
+    #[error("Circular dependency detected in block inclusions: {0}")]
+    CircularDependency(String),
+    #[error("Block at position '{0}' not found")]
+    MissingBlock(String),
+}
+
 impl Lit {
     pub fn new(input: PathBuf, output: PathBuf) -> Self {
         Lit { input, output }
@@ -148,7 +181,7 @@ impl Lit {
         let files = self.read_blocks()?;
 
         files.into_iter().try_for_each(|file| -> Result<()> {
-            let content = file.render();
+            let content = file.render()?;
 
             let full_path = self.output.join(&file.path);
             if let Some(parent) = full_path.parent() {
@@ -228,15 +261,125 @@ impl TangledFile {
         TangledFile { path, blocks }
     }
 
-    pub fn render(&self) -> String {
-        let content = self
+    /// Detect circular dependencies in block inclusions using DFS
+    fn detect_cycles(&self) -> Result<(), RenderError> {
+        let block_map: HashMap<&Position, &Block> = self
             .blocks
             .iter()
-            .map(|b| b.content.as_str())
-            .collect::<Vec<_>>()
+            .map(|b| (&b.position, b))
+            .collect();
+
+        fn visit<'a>(
+            pos: &'a Position,
+            block_map: &HashMap<&'a Position, &'a Block>,
+            visiting: &mut HashSet<&'a Position>,
+            visited: &mut HashSet<&'a Position>,
+        ) -> Result<(), RenderError> {
+            if visited.contains(pos) {
+                return Ok(());
+            }
+            if visiting.contains(pos) {
+                return Err(RenderError::CircularDependency(pos.as_ref().to_string()));
+            }
+
+            visiting.insert(pos);
+
+            if let Some(block) = block_map.get(pos) {
+                for included_pos in &block.includes {
+                    visit(included_pos, block_map, visiting, visited)?;
+                }
+            }
+
+            visiting.remove(pos);
+            visited.insert(pos);
+            Ok(())
+        }
+
+        let mut visiting = HashSet::new();
+        let mut visited = HashSet::new();
+
+        for block in &self.blocks {
+            visit(&block.position, &block_map, &mut visiting, &mut visited)?;
+        }
+
+        Ok(())
+    }
+
+    /// Find root blocks (blocks not included by any other block)
+    fn find_root_blocks(&self) -> Vec<&Block> {
+        let mut included_positions: HashSet<&Position> = HashSet::new();
+
+        for block in &self.blocks {
+            for included_pos in &block.includes {
+                included_positions.insert(included_pos);
+            }
+        }
+
+        self.blocks
+            .iter()
+            .filter(|b| !included_positions.contains(&b.position))
+            .collect()
+    }
+
+    /// Recursively expand a block's content with inclusions
+    fn expand_block(&self, block: &Block, visited: &mut HashSet<Position>) -> Result<String> {
+        // Check for cycles
+        if visited.contains(&block.position) {
+            bail!(RenderError::CircularDependency(block.position.as_ref().to_string()));
+        }
+
+        visited.insert(block.position.clone());
+
+        // Build a map for quick lookup
+        let block_map: HashMap<&Position, Vec<&Block>> = {
+            let mut map: HashMap<&Position, Vec<&Block>> = HashMap::new();
+            for b in &self.blocks {
+                map.entry(&b.position).or_default().push(b);
+            }
+            map
+        };
+
+        let mut result = block.content.clone();
+
+        // Replace each {{include:position}} with the expanded content of included blocks
+        for included_pos in &block.includes {
+            let included_blocks = block_map
+                .get(included_pos)
+                .ok_or_else(|| RenderError::MissingBlock(included_pos.as_ref().to_string()))?;
+
+            // Concatenate all blocks at this position
+            let included_content = included_blocks
+                .iter()
+                .map(|b| self.expand_block(b, visited))
+                .collect::<Result<Vec<_>>>()?
+                .join("\n\n");
+
+            let include_marker = format!("{{{{include:{}}}}}", included_pos.as_ref());
+            result = result.replace(&include_marker, &included_content);
+        }
+
+        visited.remove(&block.position);
+        Ok(result)
+    }
+
+    pub fn render(&self) -> Result<String> {
+        // Detect cycles first
+        self.detect_cycles()?;
+
+        // Find root blocks (those not included by any other block)
+        let root_blocks = self.find_root_blocks();
+
+        // Expand each root block
+        let content = root_blocks
+            .iter()
+            .map(|b| {
+                let mut visited = HashSet::new();
+                self.expand_block(b, &mut visited)
+            })
+            .collect::<Result<Vec<_>>>()?
             .join("\n\n");
 
-        format!("{content}\n")
+        Ok(format!("{content}\n"))
     }
 }
 
@@ -492,11 +635,13 @@ Line 1
             path: PathBuf::from("test.txt"),
             position: Position::try_from("z".to_string()).unwrap(),
             content: "last".to_string(),
+            includes: vec![],
         };
         let block2 = Block {
             path: PathBuf::from("test.txt"),
             position: Position::try_from("a".to_string()).unwrap(),
             content: "first".to_string(),
+            includes: vec![],
         };
 
         // blocks are intentionally unsorted (z before a)
@@ -878,5 +1023,287 @@ Content
                 .to_string()
                 .contains("must contain only lowercase letters")
         );
+    }
+
+    // Nested blocks tests
+
+    #[test]
+    fn test_parse_block_with_inclusion() {
+        let markdown = r#"```tangle:///output.txt?at=wrapper
+Header
+{{include:main}}
+Footer
+```"#;
+
+        let blocks = Lit::parse_markdown(markdown).unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].position.as_ref(), "wrapper");
+        assert_eq!(blocks[0].includes.len(), 1);
+        assert_eq!(blocks[0].includes[0].as_ref(), "main");
+    }
+
+    #[test]
+    fn test_parse_block_with_multiple_inclusions() {
+        let markdown = r#"```tangle:///output.txt?at=wrapper
+Header
+{{include:a}}
+Middle
+{{include:b}}
+Footer
+```"#;
+
+        let blocks = Lit::parse_markdown(markdown).unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].includes.len(), 2);
+        assert_eq!(blocks[0].includes[0].as_ref(), "a");
+        assert_eq!(blocks[0].includes[1].as_ref(), "b");
+    }
+
+    #[test]
+    fn test_render_simple_inclusion() -> Result<()> {
+        let markdown = r#"```tangle:///output.txt?at=wrapper
+Header
+{{include:main}}
+Footer
+```
+
+```tangle:///output.txt?at=main
+Content
+```"#;
+
+        let mut blocks = Lit::parse_markdown(markdown)?;
+        blocks.sort();
+        let file = TangledFile::new(PathBuf::from("output.txt"), blocks);
+        let content = file.render()?;
+
+        assert_eq!(content, "Header\nContent\nFooter\n");
+        Ok(())
+    }
+
+    #[test]
+    fn test_render_multiple_inclusions() -> Result<()> {
+        let markdown = r#"```tangle:///output.txt?at=wrapper
+Start
+{{include:a}}
+Middle
+{{include:b}}
+End
+```
+
+```tangle:///output.txt?at=a
+Part A
+```
+
+```tangle:///output.txt?at=b
+Part B
+```"#;
+
+        let mut blocks = Lit::parse_markdown(markdown)?;
+        blocks.sort();
+        let file = TangledFile::new(PathBuf::from("output.txt"), blocks);
+        let content = file.render()?;
+
+        assert_eq!(content, "Start\nPart A\nMiddle\nPart B\nEnd\n");
+        Ok(())
+    }
+
+    #[test]
+    fn test_render_nested_inclusions() -> Result<()> {
+        let markdown = r#"```tangle:///output.txt?at=outer
+Outer Start
+{{include:middle}}
+Outer End
+```
+
+```tangle:///output.txt?at=middle
+Middle Start
+{{include:inner}}
+Middle End
+```
+
+```tangle:///output.txt?at=inner
+Inner Content
+```"#;
+
+        let mut blocks = Lit::parse_markdown(markdown)?;
+        blocks.sort();
+        let file = TangledFile::new(PathBuf::from("output.txt"), blocks);
+        let content = file.render()?;
+
+        assert_eq!(
+            content,
+            "Outer Start\nMiddle Start\nInner Content\nMiddle End\nOuter End\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_render_multiple_blocks_same_position_included() -> Result<()> {
+        let markdown = r#"```tangle:///output.txt?at=wrapper
+Header
+{{include:content}}
+Footer
+```
+
+```tangle:///output.txt?at=content
+First part
+```
+
+```tangle:///output.txt?at=content
+Second part
+```"#;
+
+        let mut blocks = Lit::parse_markdown(markdown)?;
+        blocks.sort();
+        let file = TangledFile::new(PathBuf::from("output.txt"), blocks);
+        let content = file.render()?;
+
+        assert_eq!(content, "Header\nFirst part\n\nSecond part\nFooter\n");
+        Ok(())
+    }
+
+    #[test]
+    fn test_included_blocks_not_in_root() -> Result<()> {
+        let markdown = r#"```tangle:///output.txt?at=wrapper
+Header
+{{include:inner}}
+Footer
+```
+
+```tangle:///output.txt?at=inner
+Inner Content
+```
+
+```tangle:///output.txt?at=standalone
+Standalone Content
+```"#;
+
+        let mut blocks = Lit::parse_markdown(markdown)?;
+        blocks.sort();
+        let file = TangledFile::new(PathBuf::from("output.txt"), blocks);
+        let content = file.render()?;
+
+        // Only 'wrapper' and 'standalone' are root blocks
+        // 'inner' is included so it should not appear at the top level
+        assert!(content.contains("Standalone Content"));
+        assert!(content.contains("Header\nInner Content\nFooter"));
+        // Should not have inner content appearing twice
+        assert_eq!(content.matches("Inner Content").count(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn test_circular_dependency_direct() {
+        let block1 = Block {
+            path: PathBuf::from("test.txt"),
+            position: Position::try_from("a".to_string()).unwrap(),
+            content: "{{include:b}}".to_string(),
+            includes: vec![Position::try_from("b".to_string()).unwrap()],
+        };
+        let block2 = Block {
+            path: PathBuf::from("test.txt"),
+            position: Position::try_from("b".to_string()).unwrap(),
+            content: "{{include:a}}".to_string(),
+            includes: vec![Position::try_from("a".to_string()).unwrap()],
+        };
+
+        let file = TangledFile::new(PathBuf::from("test.txt"), vec![block1, block2]);
+        let result = file.render();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Circular dependency"));
+    }
+
+    #[test]
+    fn test_circular_dependency_indirect() {
+        let block1 = Block {
+            path: PathBuf::from("test.txt"),
+            position: Position::try_from("a".to_string()).unwrap(),
+            content: "{{include:b}}".to_string(),
+            includes: vec![Position::try_from("b".to_string()).unwrap()],
+        };
+        let block2 = Block {
+            path: PathBuf::from("test.txt"),
+            position: Position::try_from("b".to_string()).unwrap(),
+            content: "{{include:c}}".to_string(),
+            includes: vec![Position::try_from("c".to_string()).unwrap()],
+        };
+        let block3 = Block {
+            path: PathBuf::from("test.txt"),
+            position: Position::try_from("c".to_string()).unwrap(),
+            content: "{{include:a}}".to_string(),
+            includes: vec![Position::try_from("a".to_string()).unwrap()],
+        };
+
+        let file = TangledFile::new(PathBuf::from("test.txt"), vec![block1, block2, block3]);
+        let result = file.render();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Circular dependency"));
+    }
+
+    #[test]
+    fn test_missing_included_block() {
+        let block = Block {
+            path: PathBuf::from("test.txt"),
+            position: Position::try_from("a".to_string()).unwrap(),
+            content: "{{include:missing}}".to_string(),
+            includes: vec![Position::try_from("missing".to_string()).unwrap()],
+        };
+
+        let file = TangledFile::new(PathBuf::from("test.txt"), vec![block]);
+        let result = file.render();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn test_end_to_end_with_nested_blocks() -> Result<()> {
+        use std::env;
+
+        let temp_input = env::temp_dir().join("lit-test-nested-input");
+        let temp_output = env::temp_dir().join("lit-test-nested-output");
+
+        if temp_input.exists() {
+            fs::remove_dir_all(&temp_input)?;
+        }
+        if temp_output.exists() {
+            fs::remove_dir_all(&temp_output)?;
+        }
+
+        fs::create_dir_all(&temp_input)?;
+        let markdown = r#"# Nested Blocks Test
+
+```tangle:///program.txt?at=wrapper
+// File Header
+{{include:main}}
+// File Footer
+```
+
+```tangle:///program.txt?at=main
+fn main() {
+    println!("Hello from nested block!");
+}
+```
+"#;
+        fs::write(temp_input.join("test.md"), markdown)?;
+
+        let lit = Lit::new(temp_input.clone(), temp_output.clone());
+        lit.tangle()?;
+
+        let content = fs::read_to_string(temp_output.join("program.txt"))?;
+        assert_eq!(
+            content,
+            "// File Header\nfn main() {\n    println!(\"Hello from nested block!\");\n}\n// File Footer\n"
+        );
+
+        fs::remove_dir_all(&temp_input)?;
+        fs::remove_dir_all(&temp_output)?;
+
+        Ok(())
     }
 }

@@ -11,6 +11,65 @@ URL specifies a destination file; an optional `?at=` parameter specifies
 position. Lit reads markdown files, extracts these blocks, groups them by
 destination, sorts by position, and writes each group to its target file.
 
+## Nested Blocks
+
+Blocks can include other blocks using `{{include:position}}` syntax. This enables
+wrapper patterns where one block surrounds another, eliminating the need for
+separate blocks at different positions.
+
+Instead of using three blocks at positions `a`, `m`, and `z`:
+
+````markdown
+```tangle:///file.txt?at=a
+// Header
+```
+
+```tangle:///file.txt?at=m
+fn main() {}
+```
+
+```tangle:///file.txt?at=z
+// Footer
+```
+````
+
+Use a single wrapper block that includes another:
+
+````markdown
+```tangle:///file.txt?at=wrapper
+// Header
+{{include:main}}
+// Footer
+```
+
+```tangle:///file.txt?at=main
+fn main() {}
+```
+````
+
+Included blocks are excluded from top-level output. Only "root" blocks (those
+not included by any other block) appear at the top level. Blocks can nest
+arbitrarily deep: block A can include B, which includes C. Lit detects
+circular dependencies and missing references, reporting errors when found.
+
+## Dependencies and Imports
+
+The implementation requires several Rust crates and standard library modules.
+
+```tangle:///src/lib.rs?at=a
+use color_eyre::{Result, eyre::bail};
+use markdown::{ParseOptions, mdast::Node, to_mdast};
+use regex::Regex;
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::PathBuf;
+use std::sync::LazyLock;
+use thiserror::Error;
+use tracing::info;
+use url::Url;
+use walkdir::WalkDir;
+```
+
 ## Usage
 
 Lit takes an input directory and an output directory.
@@ -31,7 +90,7 @@ directories, and writes output.
         let files = self.read_blocks()?;
 
         files.into_iter().try_for_each(|file| -> Result<()> {
-            let content = file.render();
+            let content = file.render()?;
 
             let full_path = self.output.join(&file.path);
             if let Some(parent) = full_path.parent() {
@@ -373,7 +432,9 @@ Line 1
 `TangledFile` groups blocks destined for the same output file. In the future, a
 potential improvement could be to store the blocks in a data structure that
 guarantees sorting, but for now, the constructor enforces sorted blocks as an
-invariant. When rendering, it concatenates blocks with double newlines.
+invariant. When rendering, it identifies root blocks (those not included by others),
+then recursively expands inclusions, replacing inclusion markers with
+the content of included blocks.
 
 ```tangle:///src/lib.rs
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -381,23 +442,175 @@ pub struct TangledFile {
     pub path: PathBuf,
     pub blocks: Vec<Block>,
 }
+```
 
+### Rendering with Nested Blocks
+
+Rendering transforms a `TangledFile` into output text. With nested blocks, this involves:
+1. Detecting circular dependencies
+2. Finding root blocks (not included by others)
+3. Recursively expanding inclusions
+
+```tangle:///src/lib.rs?at=f
 impl TangledFile {
     pub fn new(path: PathBuf, blocks: Vec<Block>) -> Self {
         assert!(blocks.is_sorted(), "blocks must be sorted by position");
         TangledFile { path, blocks }
     }
+```
 
-    pub fn render(&self) -> String {
-        let content = self
+Cycle detection uses depth-first search with a visiting set. If we encounter a position
+already in the visiting set, a cycle exists.
+
+```tangle:///src/lib.rs?at=f
+    /// Detect circular dependencies in block inclusions using DFS
+    fn detect_cycles(&self) -> Result<(), RenderError> {
+        let block_map: HashMap<&Position, &Block> = self
             .blocks
             .iter()
-            .map(|b| b.content.as_str())
-            .collect::<Vec<_>>()
+            .map(|b| (&b.position, b))
+            .collect();
+
+        fn visit<'a>(
+            pos: &'a Position,
+            block_map: &HashMap<&'a Position, &'a Block>,
+            visiting: &mut HashSet<&'a Position>,
+            visited: &mut HashSet<&'a Position>,
+        ) -> Result<(), RenderError> {
+            if visited.contains(pos) {
+                return Ok(());
+            }
+            if visiting.contains(pos) {
+                return Err(RenderError::CircularDependency(pos.as_ref().to_string()));
+            }
+
+            visiting.insert(pos);
+
+            if let Some(block) = block_map.get(pos) {
+                for included_pos in &block.includes {
+                    visit(included_pos, block_map, visiting, visited)?;
+                }
+            }
+
+            visiting.remove(pos);
+            visited.insert(pos);
+            Ok(())
+        }
+
+        let mut visiting = HashSet::new();
+        let mut visited = HashSet::new();
+
+        for block in &self.blocks {
+            visit(&block.position, &block_map, &mut visiting, &mut visited)?;
+        }
+
+        Ok(())
+    }
+```
+
+Root blocks are those not referenced in any block's includes list.
+
+```tangle:///src/lib.rs?at=f
+    /// Find root blocks (blocks not included by any other block)
+    fn find_root_blocks(&self) -> Vec<&Block> {
+        let mut included_positions: HashSet<&Position> = HashSet::new();
+
+        for block in &self.blocks {
+            for included_pos in &block.includes {
+                included_positions.insert(included_pos);
+            }
+        }
+
+        self.blocks
+            .iter()
+            .filter(|b| !included_positions.contains(&b.position))
+            .collect()
+    }
+```
+
+Expansion recursively replaces inclusion markers. A visited set prevents infinite loops (though
+cycle detection should catch these earlier).
+
+```tangle:///src/lib.rs?at=f
+    /// Recursively expand a block's content with inclusions
+    fn expand_block(&self, block: &Block, visited: &mut HashSet<Position>) -> Result<String> {
+        // Check for cycles
+        if visited.contains(&block.position) {
+            bail!(RenderError::CircularDependency(block.position.as_ref().to_string()));
+        }
+
+        visited.insert(block.position.clone());
+
+        // Build a map for quick lookup
+        let block_map: HashMap<&Position, Vec<&Block>> = {
+            let mut map: HashMap<&Position, Vec<&Block>> = HashMap::new();
+            for b in &self.blocks {
+                map.entry(&b.position).or_default().push(b);
+            }
+            map
+        };
+
+        let mut result = block.content.clone();
+
+        // Replace each inclusion marker with the expanded content of included blocks
+        for included_pos in &block.includes {
+            let included_blocks = block_map
+                .get(included_pos)
+                .ok_or_else(|| RenderError::MissingBlock(included_pos.as_ref().to_string()))?;
+
+            // Concatenate all blocks at this position
+            let included_content = included_blocks
+                .iter()
+                .map(|b| self.expand_block(b, visited))
+                .collect::<Result<Vec<_>>>()?
+                .join("\n\n");
+
+            let include_marker = format!("{{{{include:{}}}}}", included_pos.as_ref());
+            result = result.replace(&include_marker, &included_content);
+        }
+
+        visited.remove(&block.position);
+        Ok(result)
+    }
+```
+
+The main render function orchestrates these steps.
+
+```tangle:///src/lib.rs?at=f
+    pub fn render(&self) -> Result<String> {
+        // Detect cycles first
+        self.detect_cycles()?;
+
+        // Find root blocks (those not included by any other block)
+        let root_blocks = self.find_root_blocks();
+
+        // Expand each root block
+        let content = root_blocks
+            .iter()
+            .map(|b| {
+                let mut visited = HashSet::new();
+                self.expand_block(b, &mut visited)
+            })
+            .collect::<Result<Vec<_>>>()?
             .join("\n\n");
 
-        format!("{content}\n")
+        Ok(format!("{content}\n"))
     }
+}
+```
+
+### Rendering Errors
+
+Rendering can fail when block inclusions form cycles or reference non-existent positions.
+
+```tangle:///src/lib.rs?at=f
+/// Errors that can occur when rendering tangled files with inclusions
+#[derive(Debug, Error)]
+pub enum RenderError {
+    #[error("Circular dependency detected in block inclusions: {0}")]
+    CircularDependency(String),
+    #[error("Block at position '{0}' not found")]
+    MissingBlock(String),
 }
 ```
 
@@ -429,8 +642,9 @@ impl TangledFile {
 - Destination file path
 - Position for ordering (defaults to "m")
 - Code content
+- Included positions (blocks to nest within this one)
 
-Position alone determines block order, enabling fine-grained control over final output even when blocks scatter across multiple markdown files.
+Position alone determines block order, enabling fine-grained control over final output even when blocks scatter across multiple markdown files. Inclusions enable hierarchical composition: wrapper blocks can embed other blocks at specific points in their content.
 
 ### Block Structure
 
@@ -444,6 +658,8 @@ pub struct Block {
     pub position: Position,
     /// The content of the code block
     pub content: String,
+    /// Positions of blocks to include within this block
+    pub includes: Vec<Position>,
 }
 
 impl PartialOrd for Block {
@@ -510,14 +726,42 @@ impl TryFrom<&Node> for Block {
             .transpose()?
             .unwrap_or_else(Position::middle);
 
+        // Extract inclusion markers from content
+        let includes = extract_inclusions(&code.value)?;
+
         Ok(Block {
             path: PathBuf::from(path_str),
             position,
             content: code.value.clone(),
+            includes,
         })
     }
 }
 ````
+
+### Inclusion Parsing
+
+When parsing blocks, Lit extracts inclusion markers from content using regex pattern matching. Each marker (in the form {{"{{"}}include:position{{"}}"}}) identifies a block to nest.
+
+```tangle:///src/lib.rs?at=d
+/// Regex pattern for matching inclusion markers
+static INCLUDE_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\{\{include:([a-z]+)\}\}").expect("Invalid regex pattern")
+});
+
+/// Extract all inclusion positions from content
+fn extract_inclusions(content: &str) -> std::result::Result<Vec<Position>, PositionError> {
+    INCLUDE_PATTERN
+        .captures_iter(content)
+        .map(|cap| {
+            let pos_str = cap.get(1).unwrap().as_str().to_string();
+            Position::try_from(pos_str)
+        })
+        .collect()
+}
+```
+
+The regex captures only lowercase position keys, matching the position validation rules. Extract and validate inclusions when parsing each block.
 
 ### Block Parsing Errors
 
@@ -963,7 +1207,7 @@ Content
 
 ```tangle:///src/lib.rs?at=bz
 /// Represents a validated position key for ordering blocks
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Position(String);
 
 impl Position {
