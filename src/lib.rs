@@ -1,12 +1,20 @@
 use color_eyre::{Result, eyre::bail};
 use markdown::{ParseOptions, mdast::Node, to_mdast};
+use regex::Regex;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::LazyLock;
 use thiserror::Error;
 use tracing::info;
 use url::Url;
 use walkdir::WalkDir;
+
+/// Regex pattern for valid position keys: lowercase letters with optional dashes
+/// Pattern: one or more lowercase letters, followed by zero or more groups of (dash + lowercase letters)
+static POSITION_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^[a-z]+(?:-[a-z]+)*$").expect("Invalid position regex pattern")
+});
 
 /// Represents a validated position key for ordering blocks
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -23,11 +31,12 @@ impl TryFrom<String> for Position {
     type Error = PositionError;
 
     fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
+
         if value.is_empty() {
             return Err(PositionError::Empty);
         }
 
-        if !value.chars().all(|c| c.is_ascii_lowercase()) {
+        if !POSITION_REGEX.is_match(&value) {
             return Err(PositionError::InvalidCharacters(value));
         }
 
@@ -44,11 +53,13 @@ impl AsRef<str> for Position {
 /// Errors that can occur when validating a position key
 #[derive(Debug, Error)]
 pub enum PositionError {
+
     #[error("Position key must not be empty")]
     Empty,
 
-    #[error("Position key '{0}' must contain only lowercase letters")]
+    #[error("Position key '{0}' must match pattern: lowercase letters with optional dashes (e.g., 'a', 'main', 'pre-process')")]
     InvalidCharacters(String),
+
 }
 
 /// Represents a single tangle block from markdown
@@ -208,6 +219,7 @@ impl Lit {
             })
             .collect())
     }
+
 }
 
 #[derive(Debug)]
@@ -743,7 +755,7 @@ Ten
             result
                 .unwrap_err()
                 .to_string()
-                .contains("must contain only lowercase letters")
+                .contains("must match pattern")
         );
     }
 
@@ -759,24 +771,64 @@ Mixed
             result
                 .unwrap_err()
                 .to_string()
-                .contains("must contain only lowercase letters")
+                .contains("must match pattern")
         );
     }
 
     #[test]
-    fn test_position_key_with_special_chars_rejected() {
+    fn test_position_key_with_dashes_allowed() {
         let markdown = r#"```tangle:///output.txt?at=a-b
 Special
 ```"#;
 
+        let blocks = Lit::parse_markdown(markdown).unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].path, PathBuf::from("output.txt"));
+        assert_eq!(blocks[0].position.as_ref(), "a-b");
+        assert_eq!(blocks[0].content, "Special");
+    }
+
+    #[test]
+    fn test_position_key_with_multiple_dashes_allowed() {
+        let markdown = r#"```tangle:///output.txt?at=pre-process-data
+Multi-dash
+```"#;
+
+        let blocks = Lit::parse_markdown(markdown).unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].path, PathBuf::from("output.txt"));
+        assert_eq!(blocks[0].position.as_ref(), "pre-process-data");
+        assert_eq!(blocks[0].content, "Multi-dash");
+    }
+
+    #[test]
+    fn test_position_key_starting_with_dash_rejected() {
+        let markdown = r#"```tangle:///output.txt?at=-invalid
+Invalid
+```"#;
+
         let result = Lit::parse_markdown(markdown);
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("must contain only lowercase letters")
-        );
+    }
+
+    #[test]
+    fn test_position_key_ending_with_dash_rejected() {
+        let markdown = r#"```tangle:///output.txt?at=invalid-
+Invalid
+```"#;
+
+        let result = Lit::parse_markdown(markdown);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_position_key_with_consecutive_dashes_rejected() {
+        let markdown = r#"```tangle:///output.txt?at=a--b
+Invalid
+```"#;
+
+        let result = Lit::parse_markdown(markdown);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -804,7 +856,7 @@ Content
             result
                 .unwrap_err()
                 .to_string()
-                .contains("must contain only lowercase letters")
+                .contains("must match pattern")
         );
     }
 
@@ -860,7 +912,7 @@ Content
             result
                 .unwrap_err()
                 .to_string()
-                .contains("must contain only lowercase letters")
+                .contains("must match pattern")
         );
     }
 
@@ -876,7 +928,8 @@ Content
             result
                 .unwrap_err()
                 .to_string()
-                .contains("must contain only lowercase letters")
+                .contains("must match pattern")
         );
     }
+
 }
