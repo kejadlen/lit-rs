@@ -8,7 +8,6 @@ The CLI uses `clap` for argument parsing and provides a simple interface for tan
 
 ```tangle:///src/main.rs
 use clap::Parser;
-use color_eyre::Result;
 use lit::Lit;
 use std::path::PathBuf;
 use tracing::info;
@@ -27,8 +26,8 @@ struct Args {
     output: Option<PathBuf>,
 }
 
-fn main() -> Result<()> {
-    color_eyre::install()?;
+fn main() -> miette::Result<()> {
+    miette::set_panic_hook();
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),

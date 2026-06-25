@@ -32,7 +32,7 @@ directories, and writes output.
     pub fn tangle(&self) -> Result<()> {
         let files = self.read_blocks()?;
 
-        files.into_iter().try_for_each(|file| -> Result<()> {
+        for file in files {
             let content = file.render();
 
             let full_path = self.output.join(&file.path);
@@ -41,9 +41,9 @@ directories, and writes output.
             }
             info!("Writing {}", full_path.display());
             fs::write(&full_path, content)?;
+        }
 
-            Ok(())
-        })
+        Ok(())
     }
 ```
 
@@ -57,10 +57,10 @@ blocks in quotes or lists).
     /// Parse markdown content and extract code blocks with tangle:// paths
     pub fn parse_markdown(markdown_text: &str) -> Result<Vec<Block>> {
         let ast = to_mdast(markdown_text, &ParseOptions::default())
-            .map_err(|e| eyre!("Failed to parse markdown: {}", e))?;
+            .map_err(|e| LitError::Markdown(e.to_string()))?;
 
         let Node::Root(root) = ast else {
-            bail!("Expected root node in markdown AST");
+            return Err(LitError::NotRoot);
         };
 
         // Extract snippets from top-level code blocks only
@@ -445,6 +445,14 @@ Block tests are defined in `lit/constraints.md`.
 ```tangle:///src/lib.rs?id=test-mod
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     {{}}

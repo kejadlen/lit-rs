@@ -52,7 +52,10 @@ lowercase letter, and can contain lowercase letters, digits, and single hyphens
 ```tangle:///src/lib.rs
 /// Regex pattern for valid block IDs: lowercase letter + letters/digits with single hyphens
 static BLOCK_ID_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$").unwrap()
+    // The pattern is a compile-time literal, so compilation cannot fail.
+    #[allow(clippy::unwrap_used)]
+    let pattern = Regex::new(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$").unwrap();
+    pattern
 });
 
 /// Unique identifier for a block
@@ -82,11 +85,16 @@ impl std::fmt::Display for BlockId {
 }
 
 /// Errors that can occur when creating a BlockId
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Diagnostic)]
 pub enum BlockIdError {
     #[error("Block ID cannot be empty")]
+    #[diagnostic(code(lit::block_id::empty))]
     Empty,
     #[error("Block ID '{0}' is invalid (must start with lowercase letter, contain only lowercase letters/digits/hyphens, no leading/trailing/consecutive dashes)")]
+    #[diagnostic(
+        code(lit::block_id::invalid_characters),
+        help("use a lowercase letter followed by letters, digits, or single hyphens")
+    )]
     InvalidCharacters(String),
 }
 ```
@@ -174,23 +182,6 @@ pub struct Block {
 }
 ```
 
-Blocks are ordered by the constraint solver, not by direct comparison. However,
-we implement PartialOrd and Ord to satisfy trait bounds (they panic if used):
-
-```tangle:///src/lib.rs
-impl Ord for Block {
-    fn cmp(&self, _other: &Self) -> std::cmp::Ordering {
-        panic!("Blocks cannot be directly compared; use solve_block_order instead")
-    }
-}
-
-impl PartialOrd for Block {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-```
-
 ## Parsing Constraints
 
 Parse constraints from the markdown AST node:
@@ -227,7 +218,8 @@ impl TryFrom<&Node> for Block {
         if path.starts_with("//") {
             return Err(BlockError::InvalidPath);
         }
-        // Strip the single leading slash to get a relative path
+        // A hostless URL path always begins with '/', so stripping it cannot fail.
+        #[allow(clippy::unwrap_used)]
         let path_str = path.strip_prefix('/').unwrap().to_string();
 
         // Parse constraint parameters
@@ -289,27 +281,65 @@ Error types for constraint-based ordering:
 
 ```tangle:///src/lib.rs
 /// Errors that can occur when parsing a block from a markdown node
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Diagnostic)]
 pub enum BlockError {
     #[error("Not a tangle block")]
+    #[diagnostic(code(lit::block::not_tangle))]
     NotTangleBlock,
     #[error("Tangle URL must be hostless (use tangle:///path, not tangle://path)")]
+    #[diagnostic(code(lit::block::invalid_url))]
     InvalidTangleUrl,
     #[error("Tangle URL missing path")]
+    #[diagnostic(code(lit::block::missing_path))]
     MissingPath,
     #[error("Invalid tangle URL path")]
+    #[diagnostic(code(lit::block::invalid_path))]
     InvalidPath,
     #[error(transparent)]
+    #[diagnostic(transparent)]
     BlockIdError(#[from] BlockIdError),
     #[error("Unknown block ID referenced in constraint: {0}")]
+    #[diagnostic(
+        code(lit::block::unknown_id),
+        help("declare the referenced block with ?id=… or fix the constraint")
+    )]
     UnknownBlockId(BlockId),
     #[error("Duplicate block ID within file: {0}")]
+    #[diagnostic(
+        code(lit::block::duplicate_id),
+        help("each block ID must be unique within a destination file")
+    )]
     DuplicateId(BlockId),
     #[error("Constraints are unsatisfiable (circular dependency detected)")]
+    #[diagnostic(code(lit::block::unsatisfiable))]
     UnsatisfiableConstraints,
     #[error("Constraint solver timeout")]
+    #[diagnostic(code(lit::block::solver_timeout))]
     SolverTimeout,
 }
+
+/// Top-level library error wrapping everything that can go wrong while tangling.
+#[derive(Debug, Error, Diagnostic)]
+pub enum LitError {
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Block(#[from] BlockError),
+
+    #[error("failed to parse markdown: {0}")]
+    #[diagnostic(code(lit::markdown))]
+    Markdown(String),
+
+    #[error("markdown did not parse to a root node")]
+    #[diagnostic(code(lit::markdown::not_root))]
+    NotRoot,
+
+    #[error(transparent)]
+    #[diagnostic(code(lit::io))]
+    Io(#[from] std::io::Error),
+}
+
+/// Result alias used throughout the library.
+pub type Result<T> = std::result::Result<T, LitError>;
 ```
 
 ## Constraint Solver
@@ -349,7 +379,9 @@ pub fn solve_block_order(blocks: &[Block]) -> Result<Vec<Block>> {
         }
     }
 
-    // Build ID to index map
+    // Build ID to index map. `with_ids` is filtered to blocks whose id is Some,
+    // so unwrapping the id here cannot fail.
+    #[allow(clippy::unwrap_used)]
     let id_to_idx: HashMap<_, _> = with_ids
         .iter()
         .enumerate()
@@ -388,7 +420,10 @@ pub fn solve_block_order(blocks: &[Block]) -> Result<Vec<Block>> {
     let all_vars: Vec<_> = positions.values().collect();
     solver.assert(Int::distinct(&all_vars));
 
-    // Add constraints from each block
+    // Add constraints from each block. `with_ids` only holds blocks with an id,
+    // and every such id was inserted into `positions` above, so the unwrap and
+    // index below are infallible.
+    #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
     for block in &with_ids {
         let id = block.id.as_ref().unwrap();
         let this_pos = &positions[id];
@@ -399,7 +434,7 @@ pub fn solve_block_order(blocks: &[Block]) -> Result<Vec<Block>> {
                     solver.assert(this_pos.eq(Int::from_i64(0)));
                 }
                 Constraint::Last => {
-                    solver.assert(this_pos.eq(Int::from_i64(num_blocks - 1)));
+                    solver.assert(this_pos.eq(Int::from_i64(num_blocks.saturating_sub(1))));
                 }
                 Constraint::After(ids) => {
                     for other_id in ids {
@@ -426,7 +461,10 @@ pub fn solve_block_order(blocks: &[Block]) -> Result<Vec<Block>> {
         SatResult::Sat => {
             let model = solver.get_model().ok_or(BlockError::SolverTimeout)?;
 
-            // Extract solution and sort
+            // Extract solution and sort. Every id is present (filtered above and
+            // inserted into `positions`), and the solver guarantees a concrete
+            // value for each asserted variable.
+            #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
             let mut block_positions: Vec<(Block, i64)> = with_ids
                 .iter()
                 .map(|block| {

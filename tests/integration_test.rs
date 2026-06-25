@@ -1,4 +1,6 @@
-use std::fs;
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use fs_err as fs;
 use tempfile::TempDir;
 
 #[test]
@@ -54,11 +56,10 @@ pub fn greet() {
         .output()
         .expect("Failed to execute lit");
 
-    assert!(
-        output.status.success(),
-        "lit command failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    // stderr is human-readable diagnostic text here, so lossy decoding is fine.
+    #[allow(clippy::disallowed_methods)]
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "lit command failed: {stderr}");
 
     assert!(output_dir.join("main.rs").exists());
     assert!(output_dir.join("config.toml").exists());
