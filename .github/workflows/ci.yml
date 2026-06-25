@@ -16,10 +16,6 @@ jobs:
         with:
           persist-credentials: false
 
-      # The z3 `static-link-z3` feature builds z3 from source, which needs cmake
-      # and a C++ toolchain. ubuntu-latest ships the compiler; install cmake.
-      - run: sudo apt-get update && sudo apt-get install -y cmake
-
       - run: rustup component add clippy rustfmt llvm-tools
       - run: cargo install grcov cargo-mutants just
 
@@ -35,11 +31,10 @@ jobs:
       - run: just clippy
       - run: cargo test --workspace
 
-      # Coverage and mutation testing run for visibility but do not gate CI yet.
       - name: Coverage
         run: just coverage
-        continue-on-error: true
 
+      # Mutation testing runs for visibility but does not gate CI.
       - name: Mutation testing
         run: just mutants
         continue-on-error: true
