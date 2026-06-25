@@ -534,8 +534,8 @@ fn apply_surrounds(blocks: Vec<Block>) -> Result<Vec<Block>> {
     let mut result = Vec::new();
     for block in non_surrounded {
         // Check if this block has children (blocks marked as inside=this_id)
-        if let Some(id) = &block.id {
-            if let Some(children) = surrounded.get(id) {
+        match block.id.as_ref().and_then(|id| surrounded.get(id)) {
+            Some(children) => {
                 // This block has children, replace {{}} placeholder
                 let children_content = children
                     .iter()
@@ -553,11 +553,8 @@ fn apply_surrounds(blocks: Vec<Block>) -> Result<Vec<Block>> {
                     inside: block.inside.clone(),
                     content,
                 });
-            } else {
-                result.push(block);
             }
-        } else {
-            result.push(block);
+            None => result.push(block),
         }
     }
 
@@ -601,7 +598,7 @@ Second block
                 assert_eq!(ids.len(), 1);
                 assert_eq!(ids[0].as_str(), "a");
             }
-            _ => panic!("Expected After constraint"),
+            _ => unreachable!(),
         }
     }
 
@@ -621,8 +618,103 @@ Third block
                 assert_eq!(ids[0].as_str(), "a");
                 assert_eq!(ids[1].as_str(), "b");
             }
-            _ => panic!("Expected After constraint"),
+            _ => unreachable!(),
         }
+    }
+```
+
+### Block Parsing Error Tests
+
+```tangle:///src/lib.rs?id=test-parse-invalid-scheme&inside=test-mod
+    #[test]
+    fn test_parse_block_invalid_scheme() {
+        // A code block that looks like a tangle URL but uses a non-tangle scheme
+        let markdown = r#"```https://example.com/file.txt
+code
+```"#;
+
+        let blocks = Lit::parse_markdown(markdown).unwrap();
+        assert_eq!(blocks.len(), 0);
+    }
+```
+
+```tangle:///src/lib.rs?id=test-parse-host-tangle&inside=test-mod
+    #[test]
+    fn test_parse_block_host_in_tangle_url() {
+        let markdown = r#"```tangle://example.com/path.txt
+code
+```"#;
+
+        let result = Lit::parse_markdown(markdown);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("hostless"));
+    }
+```
+
+```tangle:///src/lib.rs?id=test-parse-missing-path&inside=test-mod
+    #[test]
+    fn test_parse_block_missing_path() {
+        let markdown = r#"```tangle:///
+code
+```"#;
+
+        let result = Lit::parse_markdown(markdown);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("missing path"));
+    }
+```
+
+```tangle:///src/lib.rs?id=test-parse-invalid-path&inside=test-mod
+    #[test]
+    fn test_parse_block_invalid_path() {
+        let markdown = r#"```tangle:////etc/passwd
+code
+```"#;
+
+        let result = Lit::parse_markdown(markdown);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid tangle URL path"));
+    }
+```
+
+```tangle:///src/lib.rs?id=test-parse-empty-block-id&inside=test-mod
+    #[test]
+    fn test_parse_block_empty_block_id() {
+        let markdown = r#"```tangle:///output.txt?id=
+code
+```"#;
+
+        let result = Lit::parse_markdown(markdown);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("cannot be empty"));
+    }
+```
+
+```tangle:///src/lib.rs?id=test-parse-invalid-block-id&inside=test-mod
+    #[test]
+    fn test_parse_block_invalid_block_id() {
+        let markdown = r#"```tangle:///output.txt?id=UPPERCASE
+code
+```"#;
+
+        let result = Lit::parse_markdown(markdown);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid"));
+    }
+```
+
+```tangle:///src/lib.rs?id=test-parse-unknown-params&inside=test-mod
+    #[test]
+    fn test_parse_block_unknown_params_ignored() {
+        let markdown = r#"```tangle:///output.txt?unknown=value&also-unknown=123
+code
+```"#;
+
+        let blocks = Lit::parse_markdown(markdown).unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].content, "code");
+        assert!(blocks[0].id.is_none());
+        assert!(blocks[0].constraints.is_empty());
     }
 ```
 
@@ -687,6 +779,48 @@ Third block
         let sorted = solve_block_order(&blocks).unwrap();
         assert_eq!(sorted[0].id.as_ref().unwrap().as_str(), "first");
         assert_eq!(sorted[2].id.as_ref().unwrap().as_str(), "last");
+    }
+```
+
+```tangle:///src/lib.rs?id=test-solve-duplicate-id&inside=test-mod
+    #[test]
+    fn test_solve_duplicate_id() {
+        let blocks = vec![
+            create_constrained_block("dup", vec![], "First"),
+            create_constrained_block("dup", vec![], "Second"),
+        ];
+
+        let result = solve_block_order(&blocks);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Duplicate"));
+    }
+```
+
+```tangle:///src/lib.rs?id=test-solve-unknown-inside&inside=test-mod
+    #[test]
+    fn test_solve_unknown_inside_block_id() {
+        let blocks = vec![
+            Block {
+                path: PathBuf::from("test.txt"),
+                id: Some(BlockId::new("child".to_string()).unwrap()),
+                constraints: vec![],
+                inside: Some(BlockId::new("nonexistent".to_string()).unwrap()),
+                content: "content".to_string(),
+            },
+        ];
+
+        let result = solve_block_order(&blocks);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unknown"));
+    }
+```
+
+```tangle:///src/lib.rs?id=test-solve-empty-input&inside=test-mod
+    #[test]
+    fn test_solve_empty_input() {
+        let blocks: Vec<Block> = vec![];
+        let sorted = solve_block_order(&blocks).unwrap();
+        assert!(sorted.is_empty());
     }
 ```
 
@@ -780,6 +914,28 @@ println!("World");
         let hello_pos = wrapper_content.find("Hello").unwrap();
         let world_pos = wrapper_content.find("World").unwrap();
         assert!(hello_pos < world_pos);
+    }
+````
+
+````tangle:///src/lib.rs?id=test-surround-no-children&inside=test-mod
+    #[test]
+    fn test_surround_block_without_children() {
+        // A block with an id but no blocks inside=it should pass through unchanged;
+        // exercises the else branch in apply_surrounds (id present, no children)
+        let blocks = vec![
+            Block {
+                path: PathBuf::from("test.txt"),
+                id: Some(BlockId::new("only".to_string()).unwrap()),
+                constraints: vec![],
+                inside: None,
+                content: "only block".to_string(),
+            },
+        ];
+
+        let result = apply_surrounds(blocks).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id.as_ref().unwrap().as_str(), "only");
+        assert_eq!(result[0].content, "only block");
     }
 ````
 

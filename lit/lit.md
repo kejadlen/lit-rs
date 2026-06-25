@@ -36,9 +36,10 @@ directories, and writes output.
             let content = file.render();
 
             let full_path = self.output.join(&file.path);
-            if let Some(parent) = full_path.parent() {
-                fs::create_dir_all(parent)?;
-            }
+            // Tangle paths always have at least '/' as parent, so this cannot fail.
+            #[allow(clippy::unwrap_used)]
+            let parent = full_path.parent().unwrap();
+            fs::create_dir_all(parent)?;
             info!("Writing {}", full_path.display());
             fs::write(&full_path, content)?;
         }
@@ -60,7 +61,7 @@ blocks in quotes or lists).
             .map_err(|e| LitError::Markdown(e.to_string()))?;
 
         let Node::Root(root) = ast else {
-            return Err(LitError::NotRoot);
+            return Err(LitError::NotRoot); // cov-excl-line: unreachable — to_mdast always returns Root
         };
 
         // Extract snippets from top-level code blocks only
@@ -309,12 +310,9 @@ pub fn helper() {}
         let temp_input = env::temp_dir().join("lit-test-input");
         let temp_output = env::temp_dir().join("lit-test-output");
 
-        if temp_input.exists() {
-            fs::remove_dir_all(&temp_input)?;
-        }
-        if temp_output.exists() {
-            fs::remove_dir_all(&temp_output)?;
-        }
+        // Clean up any leftover temp dirs from previous runs
+        let _ = fs::remove_dir_all(&temp_input);
+        let _ = fs::remove_dir_all(&temp_output);
 
         fs::create_dir_all(&temp_input)?;
         let markdown = r#"# Test
@@ -356,12 +354,9 @@ Nested file
         let temp_input = env::temp_dir().join("lit-test-newline-input");
         let temp_output = env::temp_dir().join("lit-test-newline-output");
 
-        if temp_input.exists() {
-            fs::remove_dir_all(&temp_input)?;
-        }
-        if temp_output.exists() {
-            fs::remove_dir_all(&temp_output)?;
-        }
+        // Clean up any leftover temp dirs from previous runs
+        let _ = fs::remove_dir_all(&temp_input);
+        let _ = fs::remove_dir_all(&temp_output);
 
         fs::create_dir_all(&temp_input)?;
         let markdown = r#"# Test
