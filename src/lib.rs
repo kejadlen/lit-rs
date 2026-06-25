@@ -3,7 +3,12 @@ use markdown::ParseOptions;
 use markdown::mdast::Node;
 use markdown::to_mdast;
 use miette::Diagnostic;
+use petgraph::Direction;
+use petgraph::graph::DiGraph;
+use petgraph::graph::NodeIndex;
 use regex::Regex;
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -12,10 +17,6 @@ use thiserror::Error;
 use tracing::info;
 use url::Url;
 use walkdir::WalkDir;
-use z3::SatResult;
-use z3::Solver;
-use z3::ast::Ast as _;
-use z3::ast::Int;
 
 #[derive(Debug)]
 pub struct Lit {
@@ -790,7 +791,7 @@ pub enum LitError {
 /// Result alias used throughout the library.
 pub type Result<T> = std::result::Result<T, LitError>;
 
-/// Solve block ordering constraints using z3
+/// Solve block ordering constraints using a topological sort
 pub fn solve_block_order(blocks: &[Block]) -> Result<Vec<Block>> {
     if blocks.is_empty() {
         return Ok(Vec::new());
@@ -835,100 +836,101 @@ pub fn solve_block_order(blocks: &[Block]) -> Result<Vec<Block>> {
         }
     }
 
-    // Create z3 solver
-    let solver = Solver::new();
+    // Build a dependency graph: an edge a -> b means "a must come before b".
+    // Nodes are added in input order, so node index == index into `with_ids`.
+    let mut graph = DiGraph::<usize, ()>::new();
+    let nodes: Vec<NodeIndex> = (0..with_ids.len()).map(|i| graph.add_node(i)).collect();
 
-    // Create z3 variables for each block
-    let mut positions: HashMap<BlockId, Int> = HashMap::new();
-
-    for block in &with_ids {
-        if let Some(id) = &block.id {
-            let var = Int::fresh_const(id.as_str());
-            positions.insert(id.clone(), var);
-        }
-    }
-
-    let num_blocks = with_ids.len() as i64;
-
-    // All positions must be in range [0, num_blocks)
-    for var in positions.values() {
-        solver.assert(var.ge(Int::from_i64(0)));
-        solver.assert(var.lt(Int::from_i64(num_blocks)));
-    }
-
-    // All positions must be unique (distinct)
-    let all_vars: Vec<_> = positions.values().collect();
-    solver.assert(Int::distinct(&all_vars));
-
-    // Add constraints from each block. `with_ids` only holds blocks with an id,
-    // and every such id was inserted into `positions` above, so the unwrap and
-    // index below are infallible.
-    #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
-    for block in &with_ids {
-        let id = block.id.as_ref().unwrap();
-        let this_pos = &positions[id];
-
+    // Every index used to address `nodes` is in range by construction.
+    #[allow(clippy::indexing_slicing)]
+    for (i, block) in with_ids.iter().enumerate() {
         for constraint in &block.constraints {
             match constraint {
                 Constraint::First => {
-                    solver.assert(this_pos.eq(Int::from_i64(0)));
+                    // Edge to every other block, so this is the only node with
+                    // in-degree zero and the sort emits it first (absolute pos 0).
+                    for j in 0..with_ids.len() {
+                        if j != i {
+                            graph.add_edge(nodes[i], nodes[j], ());
+                        }
+                    }
                 }
                 Constraint::Last => {
-                    solver.assert(this_pos.eq(Int::from_i64(num_blocks.saturating_sub(1))));
+                    // Edge from every other block, so this node is reached only
+                    // after all of them and the sort emits it last.
+                    for j in 0..with_ids.len() {
+                        if j != i {
+                            graph.add_edge(nodes[j], nodes[i], ());
+                        }
+                    }
                 }
                 Constraint::After(ids) => {
                     for other_id in ids {
-                        let other_pos = positions
+                        let &j = id_to_idx
                             .get(other_id)
                             .ok_or_else(|| BlockError::UnknownBlockId(other_id.clone()))?;
-                        solver.assert(this_pos.gt(other_pos));
+                        graph.add_edge(nodes[j], nodes[i], ());
                     }
                 }
                 Constraint::Before(ids) => {
                     for other_id in ids {
-                        let other_pos = positions
+                        let &j = id_to_idx
                             .get(other_id)
                             .ok_or_else(|| BlockError::UnknownBlockId(other_id.clone()))?;
-                        solver.assert(this_pos.lt(other_pos));
+                        graph.add_edge(nodes[i], nodes[j], ());
                     }
                 }
             }
         }
     }
 
-    // Solve
-    match solver.check() {
-        SatResult::Sat => {
-            let model = solver.get_model().ok_or(BlockError::SolverTimeout)?;
+    // Stable topological sort (Kahn's algorithm). Ties are broken by original
+    // input index so that unconstrained blocks keep their document order.
+    let mut in_degree: Vec<usize> = nodes
+        .iter()
+        .map(|&n| graph.neighbors_directed(n, Direction::Incoming).count())
+        .collect();
 
-            // Extract solution and sort. Every id is present (filtered above and
-            // inserted into `positions`), and the solver guarantees a concrete
-            // value for each asserted variable.
-            #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
-            let mut block_positions: Vec<(Block, i64)> = with_ids
-                .iter()
-                .map(|block| {
-                    let id = block.id.as_ref().unwrap();
-                    let pos = &positions[id];
-                    let value = model.eval(pos, true).unwrap().as_i64().unwrap();
-                    ((*block).clone(), value)
-                })
-                .collect();
+    let mut ready: BinaryHeap<Reverse<usize>> = in_degree
+        .iter()
+        .enumerate()
+        .filter(|&(_, &d)| d == 0)
+        .map(|(i, _)| Reverse(i))
+        .collect();
 
-            block_positions.sort_by_key(|(_, pos)| *pos);
-
-            // Apply surround relationships
-            let mut sorted_blocks =
-                apply_surrounds(block_positions.into_iter().map(|(b, _)| b).collect())?;
-
-            // Add blocks without IDs at the end
-            sorted_blocks.extend(without_ids);
-
-            Ok(sorted_blocks)
+    // Indices come from the graph's own node set, so addressing `nodes` and
+    // `in_degree` cannot go out of bounds; the in-degree never underflows
+    // because each edge is only decremented once.
+    let mut order = Vec::with_capacity(with_ids.len());
+    #[allow(clippy::indexing_slicing)]
+    while let Some(Reverse(i)) = ready.pop() {
+        order.push(i);
+        for neighbor in graph.neighbors_directed(nodes[i], Direction::Outgoing) {
+            let j = neighbor.index();
+            in_degree[j] = in_degree[j].saturating_sub(1);
+            if in_degree[j] == 0 {
+                ready.push(Reverse(j));
+            }
         }
-        SatResult::Unsat => Err(BlockError::UnsatisfiableConstraints.into()),
-        SatResult::Unknown => Err(BlockError::SolverTimeout.into()),
     }
+
+    // If not every node was emitted, some nodes never reached in-degree zero,
+    // which means the graph contains a cycle (contradictory constraints).
+    if order.len() != with_ids.len() {
+        return Err(BlockError::UnsatisfiableConstraints.into());
+    }
+
+    // `order` is a permutation of `0..with_ids.len()`, so every index is valid.
+    #[allow(clippy::indexing_slicing)]
+    let sorted: Vec<Block> = order.iter().map(|&i| with_ids[i].clone()).collect();
+
+    // Apply surround relationships
+    let mut sorted_blocks = apply_surrounds(sorted)?;
+
+    // Add blocks without IDs at the end
+    sorted_blocks.extend(without_ids);
+
+    Ok(sorted_blocks)
 }
 
 /// Apply surround relationships to blocks

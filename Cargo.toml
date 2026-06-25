@@ -8,13 +8,13 @@ clap = { version = "*", features = ["derive"] }
 fs-err = "*"
 markdown = "*"
 miette = { version = "*", features = ["fancy"] }
+petgraph = "*"
 regex = "*"
 thiserror = "*"
 tracing = "*"
 tracing-subscriber = { version = "*", features = ["env-filter"] }
 url = "*"
 walkdir = "*"
-z3 = { version = "*", features = ["static-link-z3"] }
 
 [dev-dependencies]
 tempfile = "*"
