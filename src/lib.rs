@@ -847,7 +847,8 @@ pub fn solve_block_order(blocks: &[Block]) -> Result<Vec<Block>> {
         for constraint in &block.constraints {
             match constraint {
                 Constraint::First => {
-                    // This block precedes every other block.
+                    // Edge to every other block, so this is the only node with
+                    // in-degree zero and the sort emits it first (absolute pos 0).
                     for j in 0..with_ids.len() {
                         if j != i {
                             graph.add_edge(nodes[i], nodes[j], ());
@@ -855,7 +856,8 @@ pub fn solve_block_order(blocks: &[Block]) -> Result<Vec<Block>> {
                     }
                 }
                 Constraint::Last => {
-                    // Every other block precedes this one.
+                    // Edge from every other block, so this node is reached only
+                    // after all of them and the sort emits it last.
                     for j in 0..with_ids.len() {
                         if j != i {
                             graph.add_edge(nodes[j], nodes[i], ());

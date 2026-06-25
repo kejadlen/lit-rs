@@ -356,6 +356,20 @@ The mapping from constraints to edges is:
 - `First`: `this -> every other block`
 - `Last`: `every other block -> this`
 
+`First` and `Last` are modeled as edges to *every* other node rather than a
+special "position 0 / n-1" flag. Drawing `this -> all others` makes every other
+node have in-degree ≥ 1, so the `First` block is the only in-degree-zero node and
+Kahn's algorithm necessarily emits it first — an absolute first position, the
+same guarantee z3's `pos == 0` gave. `Last` is the mirror image. This also makes
+the contradictions fall out as cycles: two `First` blocks produce `i -> j` and
+`j -> i`, and `First` combined with `after=self` produces `X -> Y` and `Y -> X`,
+both correctly reported as unsatisfiable.
+
+Because the sort runs over the *finished* graph (in-degrees are computed only
+after the loop below), the order in which edges are added is irrelevant — and all
+nodes are created up front, so "every other block" is always the complete node
+set. There is no need to add the first/last edges in a separate pass.
+
 ```tangle:///src/lib.rs
 /// Solve block ordering constraints using a topological sort
 pub fn solve_block_order(blocks: &[Block]) -> Result<Vec<Block>> {
@@ -416,7 +430,8 @@ pub fn solve_block_order(blocks: &[Block]) -> Result<Vec<Block>> {
         for constraint in &block.constraints {
             match constraint {
                 Constraint::First => {
-                    // This block precedes every other block.
+                    // Edge to every other block, so this is the only node with
+                    // in-degree zero and the sort emits it first (absolute pos 0).
                     for j in 0..with_ids.len() {
                         if j != i {
                             graph.add_edge(nodes[i], nodes[j], ());
@@ -424,7 +439,8 @@ pub fn solve_block_order(blocks: &[Block]) -> Result<Vec<Block>> {
                     }
                 }
                 Constraint::Last => {
-                    // Every other block precedes this one.
+                    // Edge from every other block, so this node is reached only
+                    // after all of them and the sort emits it last.
                     for j in 0..with_ids.len() {
                         if j != i {
                             graph.add_edge(nodes[j], nodes[i], ());
