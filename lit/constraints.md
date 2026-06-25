@@ -623,6 +623,58 @@ Third block
     }
 ```
 
+### Display for BlockId
+
+```tangle:///src/lib.rs?id=test-block-id-display&inside=test-mod
+    #[test]
+    fn test_block_id_display() {
+        let id = BlockId::new("my-block".to_string()).unwrap();
+        assert_eq!(format!("{id}"), "my-block");
+    }
+
+```
+
+### Parsing the `before` Constraint
+
+```tangle:///src/lib.rs?id=test-parse-before&inside=test-mod
+    #[test]
+    fn test_parse_block_with_before_constraint() {
+        let markdown = r#"```tangle:///output.txt?id=a&before=b
+First block
+```"#;
+
+        let blocks = Lit::parse_markdown(markdown).unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].id.as_ref().unwrap().as_str(), "a");
+        match &blocks[0].constraints[0] {
+            Constraint::Before(ids) => {
+                assert_eq!(ids.len(), 1);
+                assert_eq!(ids[0].as_str(), "b");
+            }
+            _ => unreachable!(),
+        }
+    }
+
+```
+
+### Parsing the `first` Constraint
+
+```tangle:///src/lib.rs?id=test-parse-first&inside=test-mod
+    #[test]
+    fn test_parse_block_with_first_constraint() {
+        let markdown = r#"```tangle:///output.txt?id=lead&first
+First block
+```"#;
+
+        let blocks = Lit::parse_markdown(markdown).unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].id.as_ref().unwrap().as_str(), "lead");
+        assert_eq!(blocks[0].constraints.len(), 1);
+        assert!(matches!(blocks[0].constraints[0], Constraint::First));
+    }
+
+```
+
 ### Block Parsing Error Tests
 
 ```tangle:///src/lib.rs?id=test-parse-invalid-scheme&inside=test-mod
