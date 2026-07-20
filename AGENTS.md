@@ -26,14 +26,14 @@ fresh tangle of `lit/`.
 | File | Contents |
 |---|---|
 | `lit/lit.md` | Core tangler: parsing, reading input, writing output, `TangledFile` |
-| `lit/constraints.md` | z3 constraint solver, `Block`, `BlockId`, and all error types |
+| `lit/constraints.md` | Constraint solver (topological sort), `Block`, `BlockId`, and all error types |
 | `lit/cli.md` | The `lit` binary (`src/main.rs`) |
 | `lit/dependencies.md` | The shared `use` block tangled to the top of `src/lib.rs` |
 
 A `tangle:///path?...` fenced block names its destination file and its
 ordering constraints (`first`, `last`, `after=`, `before=`, `inside=`).
-The z3 solver resolves the order, so blocks can appear in any reading
-order within the Markdown.
+A topological sort resolves the order, so blocks can appear in any
+reading order within the Markdown.
 
 ## Commands
 

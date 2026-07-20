@@ -1,15 +1,16 @@
 # Constraint-Based Ordering
 
-This document extends Lit with constraint-based block ordering using a
-topological sort (via `petgraph`). Instead of manually specifying lexicographic
-positions with `?at=`, blocks can use semantic IDs with declarative constraints.
+Lit orders the blocks within each file from declarative constraints, resolved by
+a topological sort (via `petgraph`). Blocks carry semantic IDs and express their
+ordering as relationships to other blocks, so they can appear in any reading
+order within the Markdown.
 
 ## Overview
 
-The constraint system allows blocks to specify:
-- **ID**: Semantic identifier (e.g., `?id=imports` instead of `?at=a`)
-- **Ordering**: Constraints like `?first`, `?last`, `?after=other`, `?before=other`
-- **Nesting**: Blocks that nest inside other blocks with placeholders
+A block can specify:
+- **ID**: a semantic identifier, such as `?id=imports`
+- **Ordering**: constraints such as `?first`, `?last`, `?after=other`, `?before=other`
+- **Nesting**: placement inside another block through a placeholder
 
 Example:
 ````markdown
@@ -345,9 +346,9 @@ pub type Result<T> = std::result::Result<T, LitError>;
 ## Constraint Solver
 
 The constraints are purely ordering relations, so finding a valid ordering is a
-topological sort rather than a general SMT problem. We model each block as a node
-in a directed graph where an edge `a -> b` means "`a` must come before `b`", then
-sort the graph. A cycle means the constraints are contradictory (unsatisfiable).
+topological sort. Each block becomes a node in a directed graph where an edge
+`a -> b` means "`a` must come before `b`", and sorting the graph yields the block
+order. A cycle means the constraints are contradictory (unsatisfiable).
 
 The mapping from constraints to edges is:
 
@@ -359,11 +360,11 @@ The mapping from constraints to edges is:
 `First` and `Last` are modeled as edges to *every* other node rather than a
 special "position 0 / n-1" flag. Drawing `this -> all others` makes every other
 node have in-degree ≥ 1, so the `First` block is the only in-degree-zero node and
-Kahn's algorithm necessarily emits it first — an absolute first position, the
-same guarantee z3's `pos == 0` gave. `Last` is the mirror image. This also makes
-the contradictions fall out as cycles: two `First` blocks produce `i -> j` and
-`j -> i`, and `First` combined with `after=self` produces `X -> Y` and `Y -> X`,
-both correctly reported as unsatisfiable.
+Kahn's algorithm necessarily emits it first — an absolute first position. `Last`
+is the mirror image. Modeling them this way also makes contradictions fall out as
+cycles: two `First` blocks produce `i -> j` and `j -> i`, and `First` combined
+with `after=self` produces `X -> Y` and `Y -> X`, both correctly reported as
+unsatisfiable.
 
 Because the sort runs over the *finished* graph (in-degrees are computed only
 after the loop below), the order in which edges are added is irrelevant — and all
@@ -991,13 +992,14 @@ println!("World");
     }
 ````
 
-## Benefits
+## Why declarative constraints
 
-Constraint-based ordering provides several advantages over manual positions:
+Ordering blocks by relationship rather than by absolute position keeps the
+literate sources maintainable:
 
-1. **Semantic IDs**: `?id=imports` is clearer than `?at=a`
-2. **Declarative**: Express relationships (`after=types`) not positions
-3. **Automatic**: a topological sort computes a valid ordering
-4. **Safe**: Circular dependencies detected automatically
-5. **Flexible**: Easy to insert blocks without renumbering
-6. **Powerful**: Inside parameter enables nested structures
+- Semantic IDs like `?id=imports` say what a block is.
+- Constraints such as `?after=types` express relationships, not positions.
+- The topological sort computes a valid ordering automatically.
+- Circular dependencies surface as errors instead of silent misorderings.
+- Blocks can be added or reordered without disturbing the others.
+- The `inside` parameter composes blocks into nested structures.
