@@ -171,7 +171,7 @@ The `Block` struct represents a single tangle block with constraint-based orderi
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block {
     /// The file path to write this block to
-    pub path: PathBuf,
+    pub path: Utf8PathBuf,
     /// Optional unique identifier for this block
     pub id: Option<BlockId>,
     /// Ordering constraints for this block
@@ -228,7 +228,7 @@ impl TryFrom<&Node> for Block {
         let (id, constraints, inside) = parse_constraints(&query_params)?;
 
         Ok(Block {
-            path: PathBuf::from(path_str),
+            path: Utf8PathBuf::from(path_str),
             id,
             constraints,
             inside,
@@ -576,7 +576,7 @@ fn main() {}
 
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].path, PathBuf::from("output.txt"));
+        assert_eq!(blocks[0].path, Utf8PathBuf::from("output.txt"));
         assert_eq!(blocks[0].id.as_ref().unwrap().as_str(), "main");
         assert_eq!(blocks[0].constraints.len(), 1);
         assert!(matches!(blocks[0].constraints[0], Constraint::Last));
@@ -854,7 +854,7 @@ code
     fn test_solve_unknown_inside_block_id() {
         let blocks = vec![
             Block {
-                path: PathBuf::from("test.txt"),
+                path: Utf8PathBuf::from("test.txt"),
                 id: Some(BlockId::new("child".to_string()).unwrap()),
                 constraints: vec![],
                 inside: Some(BlockId::new("nonexistent".to_string()).unwrap()),
@@ -880,7 +880,7 @@ code
 ```tangle:///src/lib.rs?id=test-helper&inside=test-mod
     fn create_constrained_block(id: &str, constraints: Vec<Constraint>, content: &str) -> Block {
         Block {
-            path: PathBuf::from("test.txt"),
+            path: Utf8PathBuf::from("test.txt"),
             id: Some(BlockId::new(id.to_string()).unwrap()),
             constraints,
             inside: None,
@@ -977,7 +977,7 @@ println!("World");
         // exercises the else branch in apply_surrounds (id present, no children)
         let blocks = vec![
             Block {
-                path: PathBuf::from("test.txt"),
+                path: Utf8PathBuf::from("test.txt"),
                 id: Some(BlockId::new("only".to_string()).unwrap()),
                 constraints: vec![],
                 inside: None,
