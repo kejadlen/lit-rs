@@ -1,3 +1,4 @@
+use camino::Utf8PathBuf;
 use fs_err as fs;
 use markdown::ParseOptions;
 use markdown::mdast::Node;
@@ -11,7 +12,6 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::path::PathBuf;
 use std::sync::LazyLock;
 use thiserror::Error;
 use tracing::info;
@@ -20,12 +20,12 @@ use walkdir::WalkDir;
 
 #[derive(Debug)]
 pub struct Lit {
-    pub input: PathBuf,
-    pub output: PathBuf,
+    pub input: Utf8PathBuf,
+    pub output: Utf8PathBuf,
 }
 
 impl Lit {
-    pub fn new(input: PathBuf, output: PathBuf) -> Self {
+    pub fn new(input: Utf8PathBuf, output: Utf8PathBuf) -> Self {
         Lit { input, output }
     }
 
@@ -40,7 +40,7 @@ impl Lit {
             #[allow(clippy::unwrap_used)]
             let parent = full_path.parent().unwrap();
             fs::create_dir_all(parent)?;
-            info!("Writing {}", full_path.display());
+            info!("Writing {full_path}");
             fs::write(&full_path, content)?;
         }
 
@@ -70,9 +70,10 @@ impl Lit {
 
     /// Read all markdown files from input directory and parse tangle blocks
     pub fn read_blocks(&self) -> Result<Vec<TangledFile>> {
-        let mut files = HashMap::<PathBuf, Vec<Block>>::new();
+        let mut files = HashMap::<Utf8PathBuf, Vec<Block>>::new();
 
         for entry in WalkDir::new(&self.input)
+            .sort_by_file_name()
             .into_iter()
             .filter_map(|e| e.ok())
             .filter(|entry| entry.file_type().is_file())
@@ -116,7 +117,7 @@ fn main() {}
 
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].path, PathBuf::from("output.txt"));
+        assert_eq!(blocks[0].path, Utf8PathBuf::from("output.txt"));
         assert_eq!(blocks[0].id.as_ref().unwrap().as_str(), "main");
         assert_eq!(blocks[0].constraints.len(), 1);
         assert!(matches!(blocks[0].constraints[0], Constraint::Last));
@@ -377,7 +378,7 @@ code
     #[test]
     fn test_solve_unknown_inside_block_id() {
         let blocks = vec![Block {
-            path: PathBuf::from("test.txt"),
+            path: Utf8PathBuf::from("test.txt"),
             id: Some(BlockId::new("child".to_string()).unwrap()),
             constraints: vec![],
             inside: Some(BlockId::new("nonexistent".to_string()).unwrap()),
@@ -398,7 +399,7 @@ code
 
     fn create_constrained_block(id: &str, constraints: Vec<Constraint>, content: &str) -> Block {
         Block {
-            path: PathBuf::from("test.txt"),
+            path: Utf8PathBuf::from("test.txt"),
             id: Some(BlockId::new(id.to_string()).unwrap()),
             constraints,
             inside: None,
@@ -485,7 +486,7 @@ println!("World");
         // A block with an id but no blocks inside=it should pass through unchanged;
         // exercises the else branch in apply_surrounds (id present, no children)
         let blocks = vec![Block {
-            path: PathBuf::from("test.txt"),
+            path: Utf8PathBuf::from("test.txt"),
             id: Some(BlockId::new("only".to_string()).unwrap()),
             constraints: vec![],
             inside: None,
@@ -511,7 +512,7 @@ fn main() {
 
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].path, PathBuf::from("src/main.rs"));
+        assert_eq!(blocks[0].path, Utf8PathBuf::from("src/main.rs"));
         assert_eq!(
             blocks[0].content,
             "fn main() {\n    println!(\"Hello\");\n}"
@@ -535,9 +536,9 @@ code 2
 
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 2);
-        assert_eq!(blocks[0].path, PathBuf::from("file1.rs"));
+        assert_eq!(blocks[0].path, Utf8PathBuf::from("file1.rs"));
         assert_eq!(blocks[0].content, "code 1");
-        assert_eq!(blocks[1].path, PathBuf::from("file2.rs"));
+        assert_eq!(blocks[1].path, Utf8PathBuf::from("file2.rs"));
         assert_eq!(blocks[1].content, "code 2");
     }
 
@@ -558,7 +559,7 @@ let y = 10;
 
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].path, PathBuf::from("output.rs"));
+        assert_eq!(blocks[0].path, Utf8PathBuf::from("output.rs"));
         assert_eq!(
             blocks[0].content,
             "// This should be extracted\nlet y = 10;"
@@ -582,7 +583,7 @@ Top level content
 
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].path, PathBuf::from("top-level.txt"));
+        assert_eq!(blocks[0].path, Utf8PathBuf::from("top-level.txt"));
         assert_eq!(blocks[0].content, "Top level content");
     }
 
@@ -604,7 +605,7 @@ Top level content
 
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].path, PathBuf::from("top-level.txt"));
+        assert_eq!(blocks[0].path, Utf8PathBuf::from("top-level.txt"));
         assert_eq!(blocks[0].content, "Top level content");
     }
 
@@ -640,7 +641,7 @@ pub fn helper() {}
 
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].path, PathBuf::from("src/modules/utils.rs"));
+        assert_eq!(blocks[0].path, Utf8PathBuf::from("src/modules/utils.rs"));
         assert_eq!(blocks[0].content, "pub fn helper() {}");
     }
 
@@ -651,7 +652,7 @@ pub fn helper() {}
 
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].path, PathBuf::from("empty.txt"));
+        assert_eq!(blocks[0].path, Utf8PathBuf::from("empty.txt"));
         assert_eq!(blocks[0].content, "");
     }
 
@@ -659,8 +660,9 @@ pub fn helper() {}
     fn test_tangle_end_to_end() -> Result<()> {
         use std::env;
 
-        let temp_input = env::temp_dir().join("lit-test-input");
-        let temp_output = env::temp_dir().join("lit-test-output");
+        let temp_dir = Utf8PathBuf::from_path_buf(env::temp_dir()).unwrap();
+        let temp_input = temp_dir.join("lit-test-input");
+        let temp_output = temp_dir.join("lit-test-output");
 
         // Clean up any leftover temp dirs from previous runs
         let _ = fs::remove_dir_all(&temp_input);
@@ -701,8 +703,9 @@ Nested file
     fn test_tangled_files_end_with_newline() -> Result<()> {
         use std::env;
 
-        let temp_input = env::temp_dir().join("lit-test-newline-input");
-        let temp_output = env::temp_dir().join("lit-test-newline-output");
+        let temp_dir = Utf8PathBuf::from_path_buf(env::temp_dir()).unwrap();
+        let temp_input = temp_dir.join("lit-test-newline-input");
+        let temp_output = temp_dir.join("lit-test-newline-output");
 
         // Clean up any leftover temp dirs from previous runs
         let _ = fs::remove_dir_all(&temp_input);
@@ -800,7 +803,7 @@ pub enum Constraint {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block {
     /// The file path to write this block to
-    pub path: PathBuf,
+    pub path: Utf8PathBuf,
     /// Optional unique identifier for this block
     pub id: Option<BlockId>,
     /// Ordering constraints for this block
@@ -851,7 +854,7 @@ impl TryFrom<&Node> for Block {
         let (id, constraints, inside) = parse_constraints(&query_params)?;
 
         Ok(Block {
-            path: PathBuf::from(path_str),
+            path: Utf8PathBuf::from(path_str),
             id,
             constraints,
             inside,
@@ -1148,12 +1151,12 @@ fn apply_surrounds(blocks: Vec<Block>) -> Result<Vec<Block>> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TangledFile {
-    pub path: PathBuf,
+    pub path: Utf8PathBuf,
     pub blocks: Vec<Block>,
 }
 
 impl TangledFile {
-    pub fn new(path: PathBuf, blocks: Vec<Block>) -> Self {
+    pub fn new(path: Utf8PathBuf, blocks: Vec<Block>) -> Self {
         // Blocks are assumed to be pre-sorted by solve_block_order
         TangledFile { path, blocks }
     }

@@ -20,8 +20,8 @@ Lit takes an input directory and an output directory.
 ```tangle:///src/lib.rs?id=lit-struct
 #[derive(Debug)]
 pub struct Lit {
-    pub input: PathBuf,
-    pub output: PathBuf,
+    pub input: Utf8PathBuf,
+    pub output: Utf8PathBuf,
 }
 ```
 
@@ -40,7 +40,7 @@ directories, and writes output.
             #[allow(clippy::unwrap_used)]
             let parent = full_path.parent().unwrap();
             fs::create_dir_all(parent)?;
-            info!("Writing {}", full_path.display());
+            info!("Writing {full_path}");
             fs::write(&full_path, content)?;
         }
 
@@ -81,12 +81,19 @@ blocks in quotes or lists).
 
 `read_blocks` walks the input directory, parses all `.md` files, and groups blocks by destination.
 
+The walk is sorted by file name: blocks whose order isn't pinned by
+constraints keep their reading order, and across files that order is
+whatever order the files are visited in. An unsorted walk returns raw
+readdir order, which varies by filesystem — tangling the same sources on
+two machines could produce differently-ordered output.
+
 ````tangle:///src/lib.rs?id=read-blocks&inside=impl-lit
     /// Read all markdown files from input directory and parse tangle blocks
     pub fn read_blocks(&self) -> Result<Vec<TangledFile>> {
-        let mut files = HashMap::<PathBuf, Vec<Block>>::new();
+        let mut files = HashMap::<Utf8PathBuf, Vec<Block>>::new();
 
         for entry in WalkDir::new(&self.input)
+            .sort_by_file_name()
             .into_iter()
             .filter_map(|e| e.ok())
             .filter(|entry| entry.file_type().is_file())
@@ -114,7 +121,7 @@ blocks in quotes or lists).
 
 ```tangle:///src/lib.rs?id=impl-lit&after=lit-struct
 impl Lit {
-    pub fn new(input: PathBuf, output: PathBuf) -> Self {
+    pub fn new(input: Utf8PathBuf, output: Utf8PathBuf) -> Self {
         Lit { input, output }
     }
 
@@ -141,7 +148,7 @@ fn main() {
 
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].path, PathBuf::from("src/main.rs"));
+        assert_eq!(blocks[0].path, Utf8PathBuf::from("src/main.rs"));
         assert_eq!(
             blocks[0].content,
             "fn main() {\n    println!(\"Hello\");\n}"
@@ -167,9 +174,9 @@ code 2
 
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 2);
-        assert_eq!(blocks[0].path, PathBuf::from("file1.rs"));
+        assert_eq!(blocks[0].path, Utf8PathBuf::from("file1.rs"));
         assert_eq!(blocks[0].content, "code 1");
-        assert_eq!(blocks[1].path, PathBuf::from("file2.rs"));
+        assert_eq!(blocks[1].path, Utf8PathBuf::from("file2.rs"));
         assert_eq!(blocks[1].content, "code 2");
     }
 ````
@@ -192,7 +199,7 @@ let y = 10;
 
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].path, PathBuf::from("output.rs"));
+        assert_eq!(blocks[0].path, Utf8PathBuf::from("output.rs"));
         assert_eq!(
             blocks[0].content,
             "// This should be extracted\nlet y = 10;"
@@ -218,7 +225,7 @@ Top level content
 
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].path, PathBuf::from("top-level.txt"));
+        assert_eq!(blocks[0].path, Utf8PathBuf::from("top-level.txt"));
         assert_eq!(blocks[0].content, "Top level content");
     }
 ````
@@ -242,7 +249,7 @@ Top level content
 
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].path, PathBuf::from("top-level.txt"));
+        assert_eq!(blocks[0].path, Utf8PathBuf::from("top-level.txt"));
         assert_eq!(blocks[0].content, "Top level content");
     }
 ````
@@ -284,7 +291,7 @@ pub fn helper() {}
 
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].path, PathBuf::from("src/modules/utils.rs"));
+        assert_eq!(blocks[0].path, Utf8PathBuf::from("src/modules/utils.rs"));
         assert_eq!(blocks[0].content, "pub fn helper() {}");
     }
 ````
@@ -297,7 +304,7 @@ pub fn helper() {}
 
         let blocks = Lit::parse_markdown(markdown).unwrap();
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].path, PathBuf::from("empty.txt"));
+        assert_eq!(blocks[0].path, Utf8PathBuf::from("empty.txt"));
         assert_eq!(blocks[0].content, "");
     }
 ````
@@ -307,8 +314,9 @@ pub fn helper() {}
     fn test_tangle_end_to_end() -> Result<()> {
         use std::env;
 
-        let temp_input = env::temp_dir().join("lit-test-input");
-        let temp_output = env::temp_dir().join("lit-test-output");
+        let temp_dir = Utf8PathBuf::from_path_buf(env::temp_dir()).unwrap();
+        let temp_input = temp_dir.join("lit-test-input");
+        let temp_output = temp_dir.join("lit-test-output");
 
         // Clean up any leftover temp dirs from previous runs
         let _ = fs::remove_dir_all(&temp_input);
@@ -351,8 +359,9 @@ Nested file
     fn test_tangled_files_end_with_newline() -> Result<()> {
         use std::env;
 
-        let temp_input = env::temp_dir().join("lit-test-newline-input");
-        let temp_output = env::temp_dir().join("lit-test-newline-output");
+        let temp_dir = Utf8PathBuf::from_path_buf(env::temp_dir()).unwrap();
+        let temp_input = temp_dir.join("lit-test-newline-input");
+        let temp_output = temp_dir.join("lit-test-newline-output");
 
         // Clean up any leftover temp dirs from previous runs
         let _ = fs::remove_dir_all(&temp_input);
@@ -392,12 +401,12 @@ concatenates blocks with double newlines.
 ```tangle:///src/lib.rs
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TangledFile {
-    pub path: PathBuf,
+    pub path: Utf8PathBuf,
     pub blocks: Vec<Block>,
 }
 
 impl TangledFile {
-    pub fn new(path: PathBuf, blocks: Vec<Block>) -> Self {
+    pub fn new(path: Utf8PathBuf, blocks: Vec<Block>) -> Self {
         // Blocks are assumed to be pre-sorted by solve_block_order
         TangledFile { path, blocks }
     }

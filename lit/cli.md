@@ -7,9 +7,9 @@ The command-line interface for the lit tool, implemented in `src/main.rs`.
 The CLI uses `clap` for argument parsing and provides a simple interface for tangling markdown files:
 
 ```tangle:///src/main.rs
+use camino::Utf8PathBuf;
 use clap::Parser;
 use lit::Lit;
-use std::path::PathBuf;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -19,11 +19,11 @@ use tracing_subscriber::EnvFilter;
 struct Args {
     /// Input directory to process
     #[arg(value_name = "INPUT")]
-    directory: PathBuf,
+    directory: Utf8PathBuf,
 
     /// Output directory for tangled files (defaults to INPUT/out)
     #[arg(value_name = "OUTPUT")]
-    output: Option<PathBuf>,
+    output: Option<Utf8PathBuf>,
 }
 
 fn main() -> miette::Result<()> {
@@ -37,10 +37,9 @@ fn main() -> miette::Result<()> {
     let args = Args::parse();
     let output = args.output.unwrap_or_else(|| args.directory.join("out"));
 
-    let input_display = args.directory.display();
-    let output_display = output.display();
-    info!("Reading markdown files from: {input_display}");
-    info!("Writing tangled files to: {output_display}");
+    let input = &args.directory;
+    info!("Reading markdown files from: {input}");
+    info!("Writing tangled files to: {output}");
 
     let lit = Lit::new(args.directory, output);
     lit.tangle()?;
