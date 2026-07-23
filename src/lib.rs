@@ -73,6 +73,7 @@ impl Lit {
         let mut files = HashMap::<Utf8PathBuf, Vec<Block>>::new();
 
         for entry in WalkDir::new(&self.input)
+            .sort_by_file_name()
             .into_iter()
             .filter_map(|e| e.ok())
             .filter(|entry| entry.file_type().is_file())

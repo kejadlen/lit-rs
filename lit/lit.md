@@ -81,12 +81,19 @@ blocks in quotes or lists).
 
 `read_blocks` walks the input directory, parses all `.md` files, and groups blocks by destination.
 
+The walk is sorted by file name: blocks whose order isn't pinned by
+constraints keep their reading order, and across files that order is
+whatever order the files are visited in. An unsorted walk returns raw
+readdir order, which varies by filesystem — tangling the same sources on
+two machines could produce differently-ordered output.
+
 ````tangle:///src/lib.rs?id=read-blocks&inside=impl-lit
     /// Read all markdown files from input directory and parse tangle blocks
     pub fn read_blocks(&self) -> Result<Vec<TangledFile>> {
         let mut files = HashMap::<Utf8PathBuf, Vec<Block>>::new();
 
         for entry in WalkDir::new(&self.input)
+            .sort_by_file_name()
             .into_iter()
             .filter_map(|e| e.ok())
             .filter(|entry| entry.file_type().is_file())
