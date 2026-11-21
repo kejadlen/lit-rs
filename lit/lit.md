@@ -413,7 +413,7 @@ impl TangledFile {
     }
 
     pub fn render(&self) -> Result<String> {
-        if self.blocks.iter().any(|b| b.data.syntax.is_some()) {
+        if self.blocks.iter().any(|b| b.data.kind.is_some()) {
             return Ok(render_data(&self.path, &self.blocks)?);
         }
 

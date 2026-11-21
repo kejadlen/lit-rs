@@ -125,26 +125,45 @@ silently dropping data. TOML datetimes don't survive the round trip through
 
 ## Block options
 
-`DataOptions` holds the two data parameters. A block whose `syntax` is
-`None` is an ordinary text block.
+`DataOptions` holds the data parameters. A block whose `kind` is `None` is
+an ordinary text block.
+
+`as=jq` is the one `as=` value that isn't a data format: it marks an
+*operation* block, covered under [Operations](#operations) below. `let`
+marks a data block that is bound as a variable for operations but not
+merged into the output.
 
 ```tangle:///src/lib.rs
+/// What a data-aware block holds
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataKind {
+    /// A value written in the given syntax
+    Value(DataFormat),
+    /// A jq filter that transforms the value built so far
+    Jq,
+}
+
 /// Data-block parameters parsed from a tangle URL
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DataOptions {
-    /// The syntax the block's content is written in (`as=`)
-    pub syntax: Option<DataFormat>,
-    /// The key path to graft the block's value under (`at=`)
+    /// What the block's content is (`as=`)
+    pub kind: Option<DataKind>,
+    /// The key path the block applies to (`at=`)
     pub at: Vec<String>,
+    /// Bind the value as a variable only; don't merge it (`let`)
+    pub binding_only: bool,
 }
 
 fn parse_data_options(
     params: &HashMap<std::borrow::Cow<str>, std::borrow::Cow<str>>,
 ) -> std::result::Result<DataOptions, BlockError> {
-    let syntax = params
+    let kind = params
         .get("as")
-        .map(|name| {
-            DataFormat::from_name(name).ok_or_else(|| BlockError::UnknownDataFormat(name.to_string()))
+        .map(|name| match name.as_ref() {
+            "jq" => Ok(DataKind::Jq),
+            _ => DataFormat::from_name(name)
+                .map(DataKind::Value)
+                .ok_or_else(|| BlockError::UnknownDataFormat(name.to_string())),
         })
         .transpose()?;
 
@@ -159,19 +178,28 @@ fn parse_data_options(
         }
     };
 
-    if syntax.is_none() && !at.is_empty() {
+    let binding_only = params.contains_key("let");
+
+    if kind.is_none() && (!at.is_empty() || binding_only) {
         return Err(BlockError::AtWithoutAs);
     }
 
-    Ok(DataOptions { syntax, at })
+    Ok(DataOptions {
+        kind,
+        at,
+        binding_only,
+    })
 }
 ```
 
 ## Merging
 
 `render_data` turns an ordered list of data blocks into the output text.
-Each block's value is wrapped in objects for its `at=` path, then merged
-into the running result.
+It works in two passes. The first parses every value block, so that an
+operation can refer to any named block no matter where it sits in the
+order. The second walks the blocks in solved order: value blocks are
+wrapped in objects for their `at=` path and merged into the running
+result, and operation blocks rewrite it.
 
 The merge is deliberately strict, because a silent override in a literate
 document hides which paragraph actually decided a value:
@@ -182,6 +210,9 @@ document hides which paragraph actually decided a value:
 - Anything else meeting an existing value is a conflict, reported with the
   key path where the two blocks disagree.
 
+When you *do* want to override, sort, or reshape, say so with an
+operation block.
+
 A destination can't mix text and data blocks: there's no sensible way to
 splice raw text into a value.
 
@@ -191,27 +222,69 @@ pub fn render_data(path: &Utf8Path, blocks: &[Block]) -> std::result::Result<Str
     let output =
         DataFormat::from_path(path).ok_or_else(|| DataError::NoOutputFormat(path.to_owned()))?;
 
-    let mut root = Value::Null;
+    let mut steps = Vec::with_capacity(blocks.len());
+    let mut vars = Vec::new();
     for block in blocks {
-        let syntax = block
+        let kind = block
             .data
-            .syntax
+            .kind
             .ok_or_else(|| DataError::MixedBlocks(path.to_owned()))?;
-        let value = block
-            .data
-            .at
-            .iter()
-            .rev()
-            .fold(syntax.parse(&block.content)?, |inner, key| {
-                Value::Object([(key.clone(), inner)].into_iter().collect())
-            });
-        merge_value(&mut root, value, &mut Vec::new()).map_err(|key_path| DataError::Conflict {
+        let value = match kind {
+            DataKind::Value(format) => {
+                let value = format.parse(&block.content)?;
+                if let Some(id) = &block.id {
+                    vars.push((jq_var_name(id), value.clone()));
+                }
+                Some(value)
+            }
+            DataKind::Jq => None,
+        };
+        steps.push((block, value));
+    }
+
+    let mut root = Value::Null;
+    for (block, value) in steps {
+        let conflict = |key_path| DataError::Conflict {
             path: path.to_owned(),
             key_path,
-        })?;
+        };
+        match value {
+            Some(_) if block.data.binding_only => {}
+            Some(value) => {
+                let value = block.data.at.iter().rev().fold(value, |inner, key| {
+                    Value::Object([(key.clone(), inner)].into_iter().collect())
+                });
+                merge_value(&mut root, value, &mut Vec::new()).map_err(conflict)?;
+            }
+            None => {
+                let target = descend(&mut root, &block.data.at).map_err(conflict)?;
+                let input = std::mem::take(target);
+                *target = run_jq(&block.content, input, &vars).map_err(|message| DataError::Op {
+                    path: path.to_owned(),
+                    message,
+                })?;
+            }
+        }
     }
 
     output.render(&root)
+}
+
+/// Walk (and create) the objects along `keys`, returning the value there
+fn descend<'v>(
+    mut value: &'v mut Value,
+    keys: &[String],
+) -> std::result::Result<&'v mut Value, String> {
+    for (depth, key) in keys.iter().enumerate() {
+        if value.is_null() {
+            *value = Value::Object(serde_json::Map::new());
+        }
+        let Value::Object(map) = value else {
+            return Err(key_path_label(keys.iter().take(depth)));
+        };
+        value = map.entry(key.clone()).or_insert(Value::Null);
+    }
+    Ok(value)
 }
 
 /// Merge `incoming` into `existing`, returning the dotted key path of any conflict
@@ -238,12 +311,118 @@ fn merge_value(
             existing.extend(incoming);
             Ok(())
         }
-        _ => Err(if key_path.is_empty() {
-            "<root>".to_string()
-        } else {
-            key_path.join(".")
-        }),
+        _ => Err(key_path_label(key_path.iter())),
     }
+}
+
+/// A dotted key path for error messages, with `<root>` for the empty path
+fn key_path_label<'k>(keys: impl Iterator<Item = &'k String>) -> String {
+    let label = keys.map(String::as_str).collect::<Vec<_>>().join(".");
+    if label.is_empty() {
+        "<root>".to_string()
+    } else {
+        label
+    }
+}
+```
+
+## Operations
+
+Merging only ever adds. To change data, write an operation block: a block
+with `as=jq` whose content is a [jq](https://jqlang.org) filter, run by
+[jaq](https://github.com/01mf02/jaq), a jq implementation in Rust.
+
+An operation runs at its place in the solved order, on everything merged
+so far. Its output replaces that value. With `at=`, the filter runs on
+just the value at that key path (created as `null` if it's missing), so a
+paragraph about dependencies can sort the dependencies without touching
+anything else:
+
+````markdown
+```tangle:///Cargo.toml?as=jq&at=dependencies
+to_entries | sort_by(.key) | from_entries
+```
+````
+
+Order matters more for operations than for values, and lit's ordering has
+a sharp edge here: blocks without an `id` keep their reading order but are
+placed *after* every block with one. An unnamed operation written after
+the data it works on runs last. To place one anywhere else, give it (and
+the blocks around it) an `id` and constraints.
+
+A filter must produce exactly one value. One that produces none (`empty`)
+or several (`.[]`) is an error, since there's no single value to put back.
+
+### Variables
+
+Every data block with an `id` is bound as a jq variable named after it,
+with hyphens turned into underscores (`id=dev-deps` becomes `$dev_deps`).
+The variable holds the block's own parsed value, before `at=` grafting.
+Variables are bound before any operation runs, so an operation can use a
+block that comes after it in the order.
+
+Add `let` to a data block to bind it without merging it into the output.
+That makes a block into a pure data source, such as a table the prose
+explains once and several operations draw from:
+
+````markdown
+```tangle:///team.json?as=yaml&id=people&let
+- {name: Ada, role: eng}
+- {name: Grace, role: eng}
+- {name: Linus, role: ops}
+```
+
+```tangle:///team.json?as=jq
+{engineers: [$people[] | select(.role == "eng") | .name]}
+```
+````
+
+```tangle:///src/lib.rs
+/// The jq variable a named data block is bound to
+fn jq_var_name(id: &BlockId) -> String {
+    format!("${}", id.as_str().replace('-', "_"))
+}
+
+/// Run a jq filter over `input`, requiring exactly one output value
+fn run_jq(
+    code: &str,
+    input: Value,
+    vars: &[(String, Value)],
+) -> std::result::Result<Value, String> {
+    use jaq_core::load::{Arena, File, Loader};
+    use jaq_core::{Compiler, Ctx, Vars, data};
+    use jaq_json::Val;
+
+    let to_val = |value: Value| serde_json::from_value::<Val>(value).map_err(|e| e.to_string());
+
+    let arena = Arena::default();
+    let loader = Loader::new(jaq_core::defs().chain(jaq_std::defs()).chain(jaq_json::defs()));
+    let modules = loader
+        .load(&arena, File { code, path: () })
+        .map_err(|errs| format!("invalid jq filter: {errs:?}"))?;
+    let filter = Compiler::default()
+        .with_funs(jaq_core::funs().chain(jaq_std::funs()).chain(jaq_json::funs()))
+        .with_global_vars(vars.iter().map(|(name, _)| name.as_str()))
+        .compile(modules)
+        .map_err(|errs| format!("invalid jq filter: {errs:?}"))?;
+
+    let var_values = vars
+        .iter()
+        .map(|(_, value)| to_val(value.clone()))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let ctx = Ctx::<data::JustLut<Val>>::new(&filter.lut, Vars::new(var_values));
+
+    let mut outputs = filter.id.run((ctx, to_val(input)?));
+    let first = outputs.next().ok_or("jq filter produced no output")?;
+    if outputs.next().is_some() {
+        return Err("jq filter produced more than one output".to_string());
+    }
+    let output = first.map_err(|exn| match exn.get_err() {
+        Ok(err) => err.to_string(),
+        Err(_) => "jq filter halted".to_string(),
+    })?;
+
+    serde_json::from_str(&output.to_string()).map_err(|e| e.to_string())
 }
 ```
 
@@ -284,6 +463,13 @@ pub enum DataError {
         help("data destinations must end in .json, .toml, .yaml, or .yml")
     )]
     NoOutputFormat(Utf8PathBuf),
+
+    #[error("jq operation on {path} failed: {message}")]
+    #[diagnostic(
+        code(lit::data::op),
+        help("an operation must produce exactly one value")
+    )]
+    Op { path: Utf8PathBuf, message: String },
 }
 ```
 
@@ -454,8 +640,9 @@ URL parameter parsing:
         assert_eq!(
             blocks[0].data,
             DataOptions {
-                syntax: Some(DataFormat::Yaml),
+                kind: Some(DataKind::Value(DataFormat::Yaml)),
                 at: vec!["x".to_string(), "y".to_string()],
+                binding_only: false,
             }
         );
     }
@@ -486,5 +673,95 @@ text destination with the same extension is left alone:
         let text = Lit::parse_markdown("```tangle:///b.json\n{ \"raw\":1 }\n```\n").unwrap();
         let file = TangledFile::new(Utf8PathBuf::from("b.json"), text);
         assert_eq!(file.render().unwrap(), "{ \"raw\":1 }\n");
+    }
+````
+
+Operations:
+
+````tangle:///src/lib.rs?id=test-data-ops&inside=test-mod
+    #[test]
+    fn test_data_op_at_path_sorts_keys() {
+        let markdown = r#"
+```tangle:///Cargo.toml?as=jq&id=sort-deps&after=clap&at=dependencies
+to_entries | sort_by(.key) | from_entries
+```
+
+```tangle:///Cargo.toml?as=yaml&id=serde&at=dependencies
+serde: "1"
+```
+
+```tangle:///Cargo.toml?as=toml&id=clap&after=serde&at=dependencies
+clap = "4"
+```
+"#;
+        assert_eq!(
+            render_md("Cargo.toml", markdown).unwrap(),
+            "[dependencies]\nclap = \"4\"\nserde = \"1\"\n"
+        );
+    }
+
+    #[test]
+    fn test_data_op_overrides_and_uses_let_vars() {
+        let markdown = r#"
+```tangle:///team.json?as=yaml&id=team-people&let
+- {name: Ada, role: eng}
+- {name: Linus, role: ops}
+```
+
+```tangle:///team.json?as=yaml
+version: 1
+```
+
+```tangle:///team.json?as=jq
+.version = 2 | .engineers = [$team_people[] | select(.role == "eng") | .name]
+```
+"#;
+        assert_eq!(
+            render_md("team.json", markdown).unwrap(),
+            "{\n  \"version\": 2,\n  \"engineers\": [\n    \"Ada\"\n  ]\n}\n"
+        );
+    }
+
+    #[test]
+    fn test_data_op_errors() {
+        let cases = [
+            ("```tangle:///a.json?as=jq\n.[\n```\n", "invalid jq filter"),
+            ("```tangle:///a.json?as=jq\n$nope\n```\n", "invalid jq filter"),
+            ("```tangle:///a.json?as=jq\nempty\n```\n", "produced no output"),
+            ("```tangle:///a.json?as=jq\n1, 2\n```\n", "more than one output"),
+            ("```tangle:///a.json?as=jq\nerror(\"boom\")\n```\n", "boom"),
+            ("```tangle:///a.json?as=jq\nhalt\n```\n", "halted"),
+        ];
+        for (markdown, expected) in cases {
+            let err = render_md("a.json", markdown).unwrap_err().to_string();
+            assert!(err.starts_with("jq operation on a.json failed"), "{err}");
+            assert!(err.contains(expected), "{err} should contain {expected}");
+        }
+    }
+
+    #[test]
+    fn test_data_op_at_path_through_non_object() {
+        let markdown = "```tangle:///a.json?as=json\n{\"a\": 1}\n```\n\n```tangle:///a.json?as=jq&at=a.b\n.\n```\n";
+        let err = render_md("a.json", markdown).unwrap_err();
+        assert_eq!(err.to_string(), "data blocks for a.json disagree at `a`");
+
+        let markdown = "```tangle:///a.json?as=json\n[]\n```\n\n```tangle:///a.json?as=jq&at=a\n.\n```\n";
+        let err = render_md("a.json", markdown).unwrap_err();
+        assert_eq!(err.to_string(), "data blocks for a.json disagree at `<root>`");
+    }
+
+    #[test]
+    fn test_data_op_at_creates_missing_path() {
+        let markdown = "```tangle:///a.json?as=jq&at=a.b\n{x: 1}\n```\n";
+        assert_eq!(
+            render_md("a.json", markdown).unwrap(),
+            "{\n  \"a\": {\n    \"b\": {\n      \"x\": 1\n    }\n  }\n}\n"
+        );
+    }
+
+    #[test]
+    fn test_data_let_requires_as() {
+        let err = Lit::parse_markdown("```tangle:///a.json?let\n```\n").unwrap_err();
+        assert_eq!(err.to_string(), "`at=` requires `as=`");
     }
 ````

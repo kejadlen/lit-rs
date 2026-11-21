@@ -114,7 +114,9 @@ Add `as=<json|toml|yaml>` and a block's content is parsed as data instead
 of text. All data blocks for a destination are deep-merged and written in
 the format its extension names, so a `Cargo.toml` can be written as YAML
 fragments spread across your prose. `at=<dotted.path>` grafts a fragment
-under a key path. See `lit/data.md` for the merge rules.
+under a key path. Blocks with `as=jq` are operations: a jq filter that
+rewrites the merged value (or just the part under `at=`), with every named
+data block available as a `$variable`. See `lit/data.md` for the details.
 
 ````markdown
 ```tangle:///config.toml?as=yaml&at=server

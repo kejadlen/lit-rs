@@ -7,6 +7,9 @@ edition = "2024"
 camino = "*"
 clap = { version = "*", features = ["derive"] }
 fs-err = "*"
+jaq-core = "3.1.2"
+jaq-json = { version = "2.0.3", features = ["serde"] }
+jaq-std = "3.0.4"
 markdown = "*"
 miette = { version = "*", features = ["fancy"] }
 petgraph = "*"
