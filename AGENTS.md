@@ -27,6 +27,7 @@ fresh tangle of `lit/`.
 |---|---|
 | `lit/lit.md` | Core tangler: parsing, reading input, writing output, `TangledFile` |
 | `lit/constraints.md` | Constraint solver (topological sort), `Block`, `BlockId`, and all error types |
+| `lit/data.md` | Data blocks (`as=`, `at=`): parse, deep-merge, and serialize to JSON/TOML/YAML |
 | `lit/cli.md` | The `lit` binary (`src/main.rs`) |
 | `lit/dependencies.md` | The shared `use` block tangled to the top of `src/lib.rs` |
 

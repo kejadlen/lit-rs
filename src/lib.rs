@@ -1,3 +1,4 @@
+use camino::Utf8Path;
 use camino::Utf8PathBuf;
 use fs_err as fs;
 use markdown::ParseOptions;
@@ -8,6 +9,7 @@ use petgraph::Direction;
 use petgraph::graph::DiGraph;
 use petgraph::graph::NodeIndex;
 use regex::Regex;
+use serde_json::Value;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::collections::HashMap;
@@ -33,7 +35,7 @@ impl Lit {
         let files = self.read_blocks()?;
 
         for file in files {
-            let content = file.render();
+            let content = file.render()?;
 
             let full_path = self.output.join(&file.path);
             // Tangle paths always have at least '/' as parent, so this cannot fail.
@@ -50,7 +52,7 @@ impl Lit {
     /// Parse markdown content and extract code blocks with tangle:// paths
     pub fn parse_markdown(markdown_text: &str) -> Result<Vec<Block>> {
         let ast = to_mdast(markdown_text, &ParseOptions::default())
-            .map_err(|e| LitError::Markdown(e.to_string()))?;
+            .map_err(|e| LitError::Markdown(e.to_string()))?; // cov-excl-line: to_mdast only fails on MDX, which default options disable
 
         let Node::Root(root) = ast else {
             return Err(LitError::NotRoot); // cov-excl-line: unreachable — to_mdast always returns Root
@@ -351,6 +353,29 @@ code
     }
 
     #[test]
+    fn test_solve_unknown_before_block_id() {
+        let blocks = vec![create_constrained_block(
+            "a",
+            vec![Constraint::Before(vec![
+                BlockId::new("unknown".to_string()).unwrap(),
+            ])],
+            "A",
+        )];
+
+        let result = solve_block_order(&blocks);
+        assert!(result.unwrap_err().to_string().contains("Unknown block ID"));
+    }
+
+    #[test]
+    fn test_parse_invalid_after_and_before_ids() {
+        for param in ["after", "before"] {
+            let markdown = format!("```tangle:///a.txt?id=a&{param}=Bad\n```\n");
+            let err = Lit::parse_markdown(&markdown).unwrap_err();
+            assert!(err.to_string().contains("'Bad' is invalid"), "{err}");
+        }
+    }
+
+    #[test]
     fn test_solve_first_and_last() {
         let blocks = vec![
             create_constrained_block("middle", vec![], "Middle"),
@@ -383,6 +408,7 @@ code
             constraints: vec![],
             inside: Some(BlockId::new("nonexistent".to_string()).unwrap()),
             content: "content".to_string(),
+            data: DataOptions::default(),
         }];
 
         let result = solve_block_order(&blocks);
@@ -404,6 +430,7 @@ code
             constraints,
             inside: None,
             content: content.to_string(),
+            data: DataOptions::default(),
         }
     }
 
@@ -491,12 +518,304 @@ println!("World");
             constraints: vec![],
             inside: None,
             content: "only block".to_string(),
+            data: DataOptions::default(),
         }];
 
         let result = apply_surrounds(blocks).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].id.as_ref().unwrap().as_str(), "only");
         assert_eq!(result[0].content, "only block");
+    }
+
+    fn render_md(path: &str, markdown: &str) -> std::result::Result<String, DataError> {
+        let blocks = Lit::parse_markdown(markdown).unwrap();
+        let sorted = solve_block_order(&blocks).unwrap();
+        render_data(Utf8Path::new(path), &sorted)
+    }
+
+    #[test]
+    fn test_data_yaml_to_toml_with_at() {
+        let markdown = r#"
+```tangle:///config.toml?as=yaml
+server:
+  host: localhost
+  port: 8080
+```
+
+```tangle:///config.toml?as=yaml&at=server.tls
+cert: /etc/ssl/cert.pem
+```
+"#;
+        assert_eq!(
+            render_md("config.toml", markdown).unwrap(),
+            "[server]\nhost = \"localhost\"\nport = 8080\n\n[server.tls]\ncert = \"/etc/ssl/cert.pem\"\n"
+        );
+    }
+
+    #[test]
+    fn test_data_order_and_array_concat() {
+        let markdown = r#"
+```tangle:///out.json?as=toml&id=second&after=first
+tags = ["b"]
+name = "x"
+```
+
+```tangle:///out.json?as=json&id=first
+{"tags": ["a"]}
+```
+"#;
+        assert_eq!(
+            render_md("out.json", markdown).unwrap(),
+            "{\n  \"tags\": [\n    \"a\",\n    \"b\"\n  ],\n  \"name\": \"x\"\n}\n"
+        );
+    }
+
+    #[test]
+    fn test_data_yaml_output_and_empty_block() {
+        let markdown = r#"
+```tangle:///out.yml?as=json&at=a
+{"b": 1}
+```
+
+```tangle:///out.yml?as=yaml
+```
+"#;
+        assert_eq!(render_md("out.yml", markdown).unwrap(), "a:\n  b: 1\n");
+    }
+
+    #[test]
+    fn test_data_conflict_reports_key_path() {
+        let markdown = r#"
+```tangle:///out.json?as=yaml
+a: {b: 1}
+```
+
+```tangle:///out.json?as=yaml
+a: {b: 2}
+```
+"#;
+        let err = render_md("out.json", markdown).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "data blocks for out.json disagree at `a.b`"
+        );
+    }
+
+    #[test]
+    fn test_data_conflict_at_root() {
+        let markdown = r#"
+```tangle:///out.json?as=json
+[1]
+```
+
+```tangle:///out.json?as=json
+{"a": 1}
+```
+"#;
+        let err = render_md("out.json", markdown).unwrap_err();
+        assert!(err.to_string().contains("`<root>`"));
+    }
+
+    #[test]
+    fn test_data_parse_error() {
+        let markdown = "```tangle:///out.json?as=json\n{nope\n```\n";
+        let err = render_md("out.json", markdown).unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("failed to parse JSON data block")
+        );
+    }
+
+    #[test]
+    fn test_data_toml_and_yaml_parse_errors() {
+        assert!(DataFormat::Toml.parse("= 1").is_err());
+        assert!(DataFormat::Yaml.parse("a: [").is_err());
+    }
+
+    #[test]
+    fn test_data_render_error_toml_null_root() {
+        let markdown = "```tangle:///out.toml?as=json\n[1, 2]\n```\n";
+        let err = render_md("out.toml", markdown).unwrap_err();
+        assert!(err.to_string().starts_with("failed to render TOML"));
+    }
+
+    #[test]
+    fn test_data_format_display() {
+        assert_eq!(DataFormat::Json.to_string(), "JSON");
+        assert_eq!(DataFormat::Toml.to_string(), "TOML");
+        assert_eq!(DataFormat::Yaml.to_string(), "YAML");
+    }
+
+    #[test]
+    fn test_tangled_file_render_surfaces_data_error() {
+        let blocks = Lit::parse_markdown("```tangle:///a.toml?as=json\n[1]\n```\n").unwrap();
+        let file = TangledFile::new(Utf8PathBuf::from("a.toml"), blocks);
+        assert!(matches!(
+            file.render(),
+            Err(LitError::Data(DataError::Render { .. }))
+        ));
+    }
+
+    #[test]
+    fn test_data_yaml_renders_scalar_root() {
+        assert_eq!(DataFormat::Yaml.render(&Value::Null).unwrap(), "null\n");
+    }
+
+    #[test]
+    fn test_data_mixed_blocks() {
+        let markdown =
+            "```tangle:///out.json?as=json\n{}\n```\n\n```tangle:///out.json\nraw\n```\n";
+        let err = render_md("out.json", markdown).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "out.json mixes text blocks and data blocks"
+        );
+    }
+
+    #[test]
+    fn test_data_no_output_format() {
+        let markdown = "```tangle:///out.txt?as=json\n{}\n```\n";
+        let err = render_md("out.txt", markdown).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "out.txt has data blocks but no data extension"
+        );
+    }
+
+    #[test]
+    fn test_data_options_parse() {
+        let blocks = Lit::parse_markdown("```tangle:///a.json?as=yml&at=x.y\n```\n").unwrap();
+        assert_eq!(
+            blocks[0].data,
+            DataOptions {
+                kind: Some(DataKind::Value(DataFormat::Yaml)),
+                at: vec!["x".to_string(), "y".to_string()],
+                binding_only: false,
+            }
+        );
+    }
+
+    #[test]
+    fn test_data_options_errors() {
+        let unknown = Lit::parse_markdown("```tangle:///a.json?as=xml\n```\n").unwrap_err();
+        assert_eq!(unknown.to_string(), "Unknown data format: xml");
+
+        let bad_path =
+            Lit::parse_markdown("```tangle:///a.json?as=json&at=x..y\n```\n").unwrap_err();
+        assert_eq!(bad_path.to_string(), "Invalid data key path: x..y");
+
+        let no_as = Lit::parse_markdown("```tangle:///a.json?at=x\n```\n").unwrap_err();
+        assert_eq!(no_as.to_string(), "`at=` requires `as=`");
+    }
+
+    #[test]
+    fn test_tangled_file_renders_data_and_text_json() {
+        let data = Lit::parse_markdown("```tangle:///a.json?as=yaml\nk: v\n```\n").unwrap();
+        let file = TangledFile::new(Utf8PathBuf::from("a.json"), data);
+        assert_eq!(file.render().unwrap(), "{\n  \"k\": \"v\"\n}\n");
+
+        let text = Lit::parse_markdown("```tangle:///b.json\n{ \"raw\":1 }\n```\n").unwrap();
+        let file = TangledFile::new(Utf8PathBuf::from("b.json"), text);
+        assert_eq!(file.render().unwrap(), "{ \"raw\":1 }\n");
+    }
+
+    #[test]
+    fn test_data_op_at_path_sorts_keys() {
+        let markdown = r#"
+```tangle:///Cargo.toml?as=jq&id=sort-deps&after=clap&at=dependencies
+to_entries | sort_by(.key) | from_entries
+```
+
+```tangle:///Cargo.toml?as=yaml&id=serde&at=dependencies
+serde: "1"
+```
+
+```tangle:///Cargo.toml?as=toml&id=clap&after=serde&at=dependencies
+clap = "4"
+```
+"#;
+        assert_eq!(
+            render_md("Cargo.toml", markdown).unwrap(),
+            "[dependencies]\nclap = \"4\"\nserde = \"1\"\n"
+        );
+    }
+
+    #[test]
+    fn test_data_op_overrides_and_uses_let_vars() {
+        let markdown = r#"
+```tangle:///team.json?as=yaml&id=team-people&let
+- {name: Ada, role: eng}
+- {name: Linus, role: ops}
+```
+
+```tangle:///team.json?as=yaml
+version: 1
+```
+
+```tangle:///team.json?as=jq
+.version = 2 | .engineers = [$team_people[] | select(.role == "eng") | .name]
+```
+"#;
+        assert_eq!(
+            render_md("team.json", markdown).unwrap(),
+            "{\n  \"version\": 2,\n  \"engineers\": [\n    \"Ada\"\n  ]\n}\n"
+        );
+    }
+
+    #[test]
+    fn test_data_op_errors() {
+        let cases = [
+            ("```tangle:///a.json?as=jq\n.[\n```\n", "invalid jq filter"),
+            (
+                "```tangle:///a.json?as=jq\n$nope\n```\n",
+                "invalid jq filter",
+            ),
+            (
+                "```tangle:///a.json?as=jq\nempty\n```\n",
+                "produced no output",
+            ),
+            (
+                "```tangle:///a.json?as=jq\n1, 2\n```\n",
+                "more than one output",
+            ),
+            ("```tangle:///a.json?as=jq\nerror(\"boom\")\n```\n", "boom"),
+            ("```tangle:///a.json?as=jq\nhalt\n```\n", "halted"),
+        ];
+        for (markdown, expected) in cases {
+            let err = render_md("a.json", markdown).unwrap_err().to_string();
+            assert!(err.starts_with("jq operation on a.json failed"), "{err}");
+            assert!(err.contains(expected), "{err} should contain {expected}");
+        }
+    }
+
+    #[test]
+    fn test_data_op_at_path_through_non_object() {
+        let markdown = "```tangle:///a.json?as=json\n{\"a\": 1}\n```\n\n```tangle:///a.json?as=jq&at=a.b\n.\n```\n";
+        let err = render_md("a.json", markdown).unwrap_err();
+        assert_eq!(err.to_string(), "data blocks for a.json disagree at `a`");
+
+        let markdown =
+            "```tangle:///a.json?as=json\n[]\n```\n\n```tangle:///a.json?as=jq&at=a\n.\n```\n";
+        let err = render_md("a.json", markdown).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "data blocks for a.json disagree at `<root>`"
+        );
+    }
+
+    #[test]
+    fn test_data_op_at_creates_missing_path() {
+        let markdown = "```tangle:///a.json?as=jq&at=a.b\n{x: 1}\n```\n";
+        assert_eq!(
+            render_md("a.json", markdown).unwrap(),
+            "{\n  \"a\": {\n    \"b\": {\n      \"x\": 1\n    }\n  }\n}\n"
+        );
+    }
+
+    #[test]
+    fn test_data_let_requires_as() {
+        let err = Lit::parse_markdown("```tangle:///a.json?let\n```\n").unwrap_err();
+        assert_eq!(err.to_string(), "`at=` requires `as=`");
     }
 
     #[test]
@@ -812,6 +1131,8 @@ pub struct Block {
     pub inside: Option<BlockId>,
     /// The content of the code block
     pub content: String,
+    /// Data-block parameters (see `lit/data.md`)
+    pub data: DataOptions,
 }
 
 impl TryFrom<&Node> for Block {
@@ -852,6 +1173,7 @@ impl TryFrom<&Node> for Block {
         // Parse constraint parameters
         let query_params: HashMap<_, _> = parsed.query_pairs().collect();
         let (id, constraints, inside) = parse_constraints(&query_params)?;
+        let data = parse_data_options(&query_params)?;
 
         Ok(Block {
             path: Utf8PathBuf::from(path_str),
@@ -859,6 +1181,7 @@ impl TryFrom<&Node> for Block {
             constraints,
             inside,
             content: code.value.clone(),
+            data,
         })
     }
 }
@@ -934,6 +1257,24 @@ pub enum BlockError {
     #[error("Constraints are unsatisfiable (circular dependency detected)")]
     #[diagnostic(code(lit::block::unsatisfiable))]
     UnsatisfiableConstraints,
+    #[error("Unknown data format: {0}")]
+    #[diagnostic(
+        code(lit::block::unknown_data_format),
+        help("use as=json, as=toml, or as=yaml")
+    )]
+    UnknownDataFormat(String),
+    #[error("Invalid data key path: {0}")]
+    #[diagnostic(
+        code(lit::block::invalid_data_path),
+        help("use dot-separated keys with no empty segments, like at=server.tls")
+    )]
+    InvalidDataPath(String),
+    #[error("`at=` requires `as=`")]
+    #[diagnostic(
+        code(lit::block::at_without_as),
+        help("name the block's data format with as=json, as=toml, or as=yaml")
+    )]
+    AtWithoutAs,
     #[error("Constraint solver timeout")]
     #[diagnostic(code(lit::block::solver_timeout))]
     SolverTimeout,
@@ -945,6 +1286,10 @@ pub enum LitError {
     #[error(transparent)]
     #[diagnostic(transparent)]
     Block(#[from] BlockError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Data(#[from] DataError),
 
     #[error("failed to parse markdown: {0}")]
     #[diagnostic(code(lit::markdown))]
@@ -1134,19 +1479,338 @@ fn apply_surrounds(blocks: Vec<Block>) -> Result<Vec<Block>> {
                 // Replace {{}} with children content
                 let content = block.content.replace("{{}}", &children_content);
 
-                result.push(Block {
-                    path: block.path.clone(),
-                    id: block.id.clone(),
-                    constraints: block.constraints.clone(),
-                    inside: block.inside.clone(),
-                    content,
-                });
+                result.push(Block { content, ..block });
             }
             None => result.push(block),
         }
     }
 
     Ok(result)
+}
+
+/// A structured data syntax a block can be written in or rendered to
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataFormat {
+    Json,
+    Toml,
+    Yaml,
+}
+
+impl DataFormat {
+    /// The format named by an `as=` parameter
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "json" => Some(DataFormat::Json),
+            "toml" => Some(DataFormat::Toml),
+            "yaml" | "yml" => Some(DataFormat::Yaml),
+            _ => None,
+        }
+    }
+
+    /// The format a destination path should be rendered in
+    pub fn from_path(path: &Utf8Path) -> Option<Self> {
+        path.extension().and_then(Self::from_name)
+    }
+
+    pub fn parse(self, text: &str) -> std::result::Result<Value, DataError> {
+        let parsed = match self {
+            DataFormat::Json => serde_json::from_str(text).map_err(|e| e.to_string()),
+            DataFormat::Toml => toml::from_str(text).map_err(|e| e.to_string()),
+            DataFormat::Yaml => serde_norway::from_str(text).map_err(|e| e.to_string()),
+        };
+        parsed.map_err(|message| DataError::Parse {
+            format: self,
+            message,
+        })
+    }
+
+    pub fn render(self, value: &Value) -> std::result::Result<String, DataError> {
+        let rendered = match self {
+            DataFormat::Json => serde_json::to_string_pretty(value).map_err(|e| e.to_string()), // cov-excl-line: a Value always serializes to JSON
+            DataFormat::Toml => toml::to_string(value).map_err(|e| e.to_string()),
+            DataFormat::Yaml => serde_norway::to_string(value).map_err(|e| e.to_string()),
+        }
+        .map_err(|message| DataError::Render {
+            format: self,
+            message,
+        })?;
+        Ok(format!("{}\n", rendered.trim_end()))
+    }
+}
+
+impl std::fmt::Display for DataFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            DataFormat::Json => "JSON",
+            DataFormat::Toml => "TOML",
+            DataFormat::Yaml => "YAML",
+        };
+        write!(f, "{name}")
+    }
+}
+
+/// What a data-aware block holds
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataKind {
+    /// A value written in the given syntax
+    Value(DataFormat),
+    /// A jq filter that transforms the value built so far
+    Jq,
+}
+
+/// Data-block parameters parsed from a tangle URL
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DataOptions {
+    /// What the block's content is (`as=`)
+    pub kind: Option<DataKind>,
+    /// The key path the block applies to (`at=`)
+    pub at: Vec<String>,
+    /// Bind the value as a variable only; don't merge it (`let`)
+    pub binding_only: bool,
+}
+
+fn parse_data_options(
+    params: &HashMap<std::borrow::Cow<str>, std::borrow::Cow<str>>,
+) -> std::result::Result<DataOptions, BlockError> {
+    let kind = params
+        .get("as")
+        .map(|name| match name.as_ref() {
+            "jq" => Ok(DataKind::Jq),
+            _ => DataFormat::from_name(name)
+                .map(DataKind::Value)
+                .ok_or_else(|| BlockError::UnknownDataFormat(name.to_string())),
+        })
+        .transpose()?;
+
+    let at = match params.get("at") {
+        None => Vec::new(),
+        Some(path) => {
+            let keys: Vec<String> = path.split('.').map(str::to_string).collect();
+            if keys.iter().any(String::is_empty) {
+                return Err(BlockError::InvalidDataPath(path.to_string()));
+            }
+            keys
+        }
+    };
+
+    let binding_only = params.contains_key("let");
+
+    if kind.is_none() && (!at.is_empty() || binding_only) {
+        return Err(BlockError::AtWithoutAs);
+    }
+
+    Ok(DataOptions {
+        kind,
+        at,
+        binding_only,
+    })
+}
+
+/// Merge an ordered list of data blocks and render them for `path`
+pub fn render_data(path: &Utf8Path, blocks: &[Block]) -> std::result::Result<String, DataError> {
+    let output =
+        DataFormat::from_path(path).ok_or_else(|| DataError::NoOutputFormat(path.to_owned()))?;
+
+    let mut steps = Vec::with_capacity(blocks.len());
+    let mut vars = Vec::new();
+    for block in blocks {
+        let kind = block
+            .data
+            .kind
+            .ok_or_else(|| DataError::MixedBlocks(path.to_owned()))?;
+        let value = match kind {
+            DataKind::Value(format) => {
+                let value = format.parse(&block.content)?;
+                if let Some(id) = &block.id {
+                    vars.push((jq_var_name(id), value.clone()));
+                }
+                Some(value)
+            }
+            DataKind::Jq => None,
+        };
+        steps.push((block, value));
+    }
+
+    let mut root = Value::Null;
+    for (block, value) in steps {
+        let conflict = |key_path| DataError::Conflict {
+            path: path.to_owned(),
+            key_path,
+        };
+        match value {
+            Some(_) if block.data.binding_only => {}
+            Some(value) => {
+                let value = block.data.at.iter().rev().fold(value, |inner, key| {
+                    Value::Object([(key.clone(), inner)].into_iter().collect())
+                });
+                merge_value(&mut root, value, &mut Vec::new()).map_err(conflict)?;
+            }
+            None => {
+                let target = descend(&mut root, &block.data.at).map_err(conflict)?;
+                let input = std::mem::take(target);
+                *target =
+                    run_jq(&block.content, input, &vars).map_err(|message| DataError::Op {
+                        path: path.to_owned(),
+                        message,
+                    })?;
+            }
+        }
+    }
+
+    output.render(&root)
+}
+
+/// Walk (and create) the objects along `keys`, returning the value there
+fn descend<'v>(
+    mut value: &'v mut Value,
+    keys: &[String],
+) -> std::result::Result<&'v mut Value, String> {
+    for (depth, key) in keys.iter().enumerate() {
+        if value.is_null() {
+            *value = Value::Object(serde_json::Map::new());
+        }
+        let Value::Object(map) = value else {
+            return Err(key_path_label(keys.iter().take(depth)));
+        };
+        value = map.entry(key.clone()).or_insert(Value::Null);
+    }
+    Ok(value)
+}
+
+/// Merge `incoming` into `existing`, returning the dotted key path of any conflict
+fn merge_value(
+    existing: &mut Value,
+    incoming: Value,
+    key_path: &mut Vec<String>,
+) -> std::result::Result<(), String> {
+    match (existing, incoming) {
+        (_, Value::Null) => Ok(()),
+        (existing @ Value::Null, incoming) => {
+            *existing = incoming;
+            Ok(())
+        }
+        (Value::Object(existing), Value::Object(incoming)) => {
+            for (key, value) in incoming {
+                key_path.push(key.clone());
+                merge_value(existing.entry(key).or_insert(Value::Null), value, key_path)?;
+                key_path.pop();
+            }
+            Ok(())
+        }
+        (Value::Array(existing), Value::Array(incoming)) => {
+            existing.extend(incoming);
+            Ok(())
+        }
+        _ => Err(key_path_label(key_path.iter())),
+    }
+}
+
+/// A dotted key path for error messages, with `<root>` for the empty path
+fn key_path_label<'k>(keys: impl Iterator<Item = &'k String>) -> String {
+    let label = keys.map(String::as_str).collect::<Vec<_>>().join(".");
+    if label.is_empty() {
+        "<root>".to_string()
+    } else {
+        label
+    }
+}
+
+/// The jq variable a named data block is bound to
+fn jq_var_name(id: &BlockId) -> String {
+    format!("${}", id.as_str().replace('-', "_"))
+}
+
+/// Run a jq filter over `input`, requiring exactly one output value
+fn run_jq(
+    code: &str,
+    input: Value,
+    vars: &[(String, Value)],
+) -> std::result::Result<Value, String> {
+    use jaq_core::load::{Arena, File, Loader};
+    use jaq_core::{Compiler, Ctx, Vars, data};
+    use jaq_json::Val;
+
+    let to_val = |value: Value| serde_json::from_value::<Val>(value).map_err(|e| e.to_string());
+
+    let arena = Arena::default();
+    let loader = Loader::new(
+        jaq_core::defs()
+            .chain(jaq_std::defs())
+            .chain(jaq_json::defs()),
+    );
+    let modules = loader
+        .load(&arena, File { code, path: () })
+        .map_err(|errs| format!("invalid jq filter: {errs:?}"))?;
+    let filter = Compiler::default()
+        .with_funs(
+            jaq_core::funs()
+                .chain(jaq_std::funs())
+                .chain(jaq_json::funs()),
+        )
+        .with_global_vars(vars.iter().map(|(name, _)| name.as_str()))
+        .compile(modules)
+        .map_err(|errs| format!("invalid jq filter: {errs:?}"))?;
+
+    let var_values = vars
+        .iter()
+        .map(|(_, value)| to_val(value.clone()))
+        .collect::<std::result::Result<Vec<_>, _>>()?; // cov-excl-line: every serde_json::Value deserializes into a jaq Val
+    let ctx = Ctx::<data::JustLut<Val>>::new(&filter.lut, Vars::new(var_values));
+
+    let mut outputs = filter.id.run((ctx, to_val(input)?));
+    let first = outputs.next().ok_or("jq filter produced no output")?;
+    if outputs.next().is_some() {
+        return Err("jq filter produced more than one output".to_string());
+    }
+    let output = first.map_err(|exn| match exn.get_err() {
+        Ok(err) => err.to_string(),
+        Err(_) => "jq filter halted".to_string(),
+    })?;
+
+    serde_json::from_str(&output.to_string()).map_err(|e| e.to_string())
+}
+
+/// Errors that can occur while merging and rendering data blocks
+#[derive(Debug, Error, Diagnostic)]
+pub enum DataError {
+    #[error("failed to parse {format} data block: {message}")]
+    #[diagnostic(code(lit::data::parse))]
+    Parse { format: DataFormat, message: String },
+
+    #[error("failed to render {format}: {message}")]
+    #[diagnostic(
+        code(lit::data::render),
+        help("TOML needs a table at the root and has no null")
+    )]
+    Render { format: DataFormat, message: String },
+
+    #[error("data blocks for {path} disagree at `{key_path}`")]
+    #[diagnostic(
+        code(lit::data::conflict),
+        help("only objects merge and arrays concatenate; any other value can be set by one block")
+    )]
+    Conflict { path: Utf8PathBuf, key_path: String },
+
+    #[error("{0} mixes text blocks and data blocks")]
+    #[diagnostic(
+        code(lit::data::mixed),
+        help("give every block for this file an `as=` format, or none of them")
+    )]
+    MixedBlocks(Utf8PathBuf),
+
+    #[error("{0} has data blocks but no data extension")]
+    #[diagnostic(
+        code(lit::data::no_output_format),
+        help("data destinations must end in .json, .toml, .yaml, or .yml")
+    )]
+    NoOutputFormat(Utf8PathBuf),
+
+    #[error("jq operation on {path} failed: {message}")]
+    #[diagnostic(
+        code(lit::data::op),
+        help("an operation must produce exactly one value")
+    )]
+    Op { path: Utf8PathBuf, message: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1161,7 +1825,11 @@ impl TangledFile {
         TangledFile { path, blocks }
     }
 
-    pub fn render(&self) -> String {
+    pub fn render(&self) -> Result<String> {
+        if self.blocks.iter().any(|b| b.data.kind.is_some()) {
+            return Ok(render_data(&self.path, &self.blocks)?);
+        }
+
         let content = self
             .blocks
             .iter()
@@ -1169,6 +1837,6 @@ impl TangledFile {
             .collect::<Vec<_>>()
             .join("\n\n");
 
-        format!("{content}\n")
+        Ok(format!("{content}\n"))
     }
 }

@@ -33,7 +33,7 @@ directories, and writes output.
         let files = self.read_blocks()?;
 
         for file in files {
-            let content = file.render();
+            let content = file.render()?;
 
             let full_path = self.output.join(&file.path);
             // Tangle paths always have at least '/' as parent, so this cannot fail.
@@ -58,7 +58,7 @@ blocks in quotes or lists).
     /// Parse markdown content and extract code blocks with tangle:// paths
     pub fn parse_markdown(markdown_text: &str) -> Result<Vec<Block>> {
         let ast = to_mdast(markdown_text, &ParseOptions::default())
-            .map_err(|e| LitError::Markdown(e.to_string()))?;
+            .map_err(|e| LitError::Markdown(e.to_string()))?; // cov-excl-line: to_mdast only fails on MDX, which default options disable
 
         let Node::Root(root) = ast else {
             return Err(LitError::NotRoot); // cov-excl-line: unreachable — to_mdast always returns Root
@@ -396,7 +396,8 @@ Line 1
 
 `TangledFile` groups blocks destined for the same output file. The constructor
 receives blocks already sorted by the constraint solver. When rendering, it
-concatenates blocks with double newlines.
+concatenates blocks with double newlines. A file with any data blocks is
+merged and serialized instead (see `lit/data.md`).
 
 ```tangle:///src/lib.rs
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -411,7 +412,11 @@ impl TangledFile {
         TangledFile { path, blocks }
     }
 
-    pub fn render(&self) -> String {
+    pub fn render(&self) -> Result<String> {
+        if self.blocks.iter().any(|b| b.data.kind.is_some()) {
+            return Ok(render_data(&self.path, &self.blocks)?);
+        }
+
         let content = self
             .blocks
             .iter()
@@ -419,7 +424,7 @@ impl TangledFile {
             .collect::<Vec<_>>()
             .join("\n\n");
 
-        format!("{content}\n")
+        Ok(format!("{content}\n"))
     }
 }
 ```

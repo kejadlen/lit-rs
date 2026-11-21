@@ -180,6 +180,8 @@ pub struct Block {
     pub inside: Option<BlockId>,
     /// The content of the code block
     pub content: String,
+    /// Data-block parameters (see `lit/data.md`)
+    pub data: DataOptions,
 }
 ```
 
@@ -226,6 +228,7 @@ impl TryFrom<&Node> for Block {
         // Parse constraint parameters
         let query_params: HashMap<_, _> = parsed.query_pairs().collect();
         let (id, constraints, inside) = parse_constraints(&query_params)?;
+        let data = parse_data_options(&query_params)?;
 
         Ok(Block {
             path: Utf8PathBuf::from(path_str),
@@ -233,6 +236,7 @@ impl TryFrom<&Node> for Block {
             constraints,
             inside,
             content: code.value.clone(),
+            data,
         })
     }
 }
@@ -314,6 +318,24 @@ pub enum BlockError {
     #[error("Constraints are unsatisfiable (circular dependency detected)")]
     #[diagnostic(code(lit::block::unsatisfiable))]
     UnsatisfiableConstraints,
+    #[error("Unknown data format: {0}")]
+    #[diagnostic(
+        code(lit::block::unknown_data_format),
+        help("use as=json, as=toml, or as=yaml")
+    )]
+    UnknownDataFormat(String),
+    #[error("Invalid data key path: {0}")]
+    #[diagnostic(
+        code(lit::block::invalid_data_path),
+        help("use dot-separated keys with no empty segments, like at=server.tls")
+    )]
+    InvalidDataPath(String),
+    #[error("`at=` requires `as=`")]
+    #[diagnostic(
+        code(lit::block::at_without_as),
+        help("name the block's data format with as=json, as=toml, or as=yaml")
+    )]
+    AtWithoutAs,
     #[error("Constraint solver timeout")]
     #[diagnostic(code(lit::block::solver_timeout))]
     SolverTimeout,
@@ -325,6 +347,10 @@ pub enum LitError {
     #[error(transparent)]
     #[diagnostic(transparent)]
     Block(#[from] BlockError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Data(#[from] DataError),
 
     #[error("failed to parse markdown: {0}")]
     #[diagnostic(code(lit::markdown))]
@@ -547,13 +573,7 @@ fn apply_surrounds(blocks: Vec<Block>) -> Result<Vec<Block>> {
                 // Replace {{}} with children content
                 let content = block.content.replace("{{}}", &children_content);
 
-                result.push(Block {
-                    path: block.path.clone(),
-                    id: block.id.clone(),
-                    constraints: block.constraints.clone(),
-                    inside: block.inside.clone(),
-                    content,
-                });
+                result.push(Block { content, ..block });
             }
             None => result.push(block),
         }
@@ -818,6 +838,25 @@ code
         assert!(result.unwrap_err().to_string().contains("Unknown block ID"));
     }
 
+    #[test]
+    fn test_solve_unknown_before_block_id() {
+        let blocks = vec![
+            create_constrained_block("a", vec![Constraint::Before(vec![BlockId::new("unknown".to_string()).unwrap()])], "A"),
+        ];
+
+        let result = solve_block_order(&blocks);
+        assert!(result.unwrap_err().to_string().contains("Unknown block ID"));
+    }
+
+    #[test]
+    fn test_parse_invalid_after_and_before_ids() {
+        for param in ["after", "before"] {
+            let markdown = format!("```tangle:///a.txt?id=a&{param}=Bad\n```\n");
+            let err = Lit::parse_markdown(&markdown).unwrap_err();
+            assert!(err.to_string().contains("'Bad' is invalid"), "{err}");
+        }
+    }
+
 ```
 
 ```tangle:///src/lib.rs?id=test-solve-first-last&inside=test-mod
@@ -859,6 +898,7 @@ code
                 constraints: vec![],
                 inside: Some(BlockId::new("nonexistent".to_string()).unwrap()),
                 content: "content".to_string(),
+                data: DataOptions::default(),
             },
         ];
 
@@ -885,6 +925,7 @@ code
             constraints,
             inside: None,
             content: content.to_string(),
+            data: DataOptions::default(),
         }
     }
 ```
@@ -982,6 +1023,7 @@ println!("World");
                 constraints: vec![],
                 inside: None,
                 content: "only block".to_string(),
+                data: DataOptions::default(),
             },
         ];
 
