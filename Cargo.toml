@@ -11,7 +11,10 @@ markdown = "*"
 miette = { version = "*", features = ["fancy"] }
 petgraph = "*"
 regex = "*"
+serde_json = { version = "*", features = ["preserve_order"] }
+serde_norway = "*"
 thiserror = "*"
+toml = { version = "*", features = ["preserve_order"] }
 tracing = "*"
 tracing-subscriber = { version = "*", features = ["env-filter"] }
 url = "*"

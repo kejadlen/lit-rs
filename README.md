@@ -108,12 +108,28 @@ If two blocks declare conflicting constraints (a cycle, or a reference to
 an `id` that does not exist), lit reports a diagnostic instead of
 producing output.
 
+### Data blocks
+
+Add `as=<json|toml|yaml>` and a block's content is parsed as data instead
+of text. All data blocks for a destination are deep-merged and written in
+the format its extension names, so a `Cargo.toml` can be written as YAML
+fragments spread across your prose. `at=<dotted.path>` grafts a fragment
+under a key path. See `lit/data.md` for the merge rules.
+
+````markdown
+```tangle:///config.toml?as=yaml&at=server
+host: localhost
+port: 8080
+```
+````
+
 ## Project layout
 
 | Path | Contents |
 |---|---|
 | `lit/lit.md` | Core tangler: parsing, reading input, writing output |
 | `lit/constraints.md` | Constraint solving, `Block`, and error types |
+| `lit/data.md` | Data blocks: `as=`/`at=`, merging, JSON/TOML/YAML output |
 | `lit/cli.md` | The `lit` binary |
 | `lit/dependencies.md` | Shared imports tangled to the top of `src/lib.rs` |
 | `src/` | **Generated** — never edit by hand |

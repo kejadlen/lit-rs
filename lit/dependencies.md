@@ -11,8 +11,11 @@ Key dependencies include:
 - `walkdir` for traversing input directories
 - `tracing` for logging
 - `petgraph` for constraint solving via topological sort
+- `serde_json`, `toml`, and `serde_norway` (a maintained `serde_yaml` fork)
+  for data blocks; `serde_json::Value` is the shared in-memory shape
 
 ```tangle:///src/lib.rs?id=imports&first
+use camino::Utf8Path;
 use camino::Utf8PathBuf;
 use fs_err as fs;
 use markdown::ParseOptions;
@@ -23,6 +26,7 @@ use petgraph::Direction;
 use petgraph::graph::DiGraph;
 use petgraph::graph::NodeIndex;
 use regex::Regex;
+use serde_json::Value;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::collections::HashMap;
