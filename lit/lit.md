@@ -58,7 +58,7 @@ blocks in quotes or lists).
     /// Parse markdown content and extract code blocks with tangle:// paths
     pub fn parse_markdown(markdown_text: &str) -> Result<Vec<Block>> {
         let ast = to_mdast(markdown_text, &ParseOptions::default())
-            .map_err(|e| LitError::Markdown(e.to_string()))?;
+            .map_err(|e| LitError::Markdown(e.to_string()))?; // cov-excl-line: to_mdast only fails on MDX, which default options disable
 
         let Node::Root(root) = ast else {
             return Err(LitError::NotRoot); // cov-excl-line: unreachable — to_mdast always returns Root

@@ -409,7 +409,7 @@ fn run_jq(
     let var_values = vars
         .iter()
         .map(|(_, value)| to_val(value.clone()))
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+        .collect::<std::result::Result<Vec<_>, _>>()?; // cov-excl-line: every serde_json::Value deserializes into a jaq Val
     let ctx = Ctx::<data::JustLut<Val>>::new(&filter.lut, Vars::new(var_values));
 
     let mut outputs = filter.id.run((ctx, to_val(input)?));

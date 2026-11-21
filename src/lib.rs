@@ -52,7 +52,7 @@ impl Lit {
     /// Parse markdown content and extract code blocks with tangle:// paths
     pub fn parse_markdown(markdown_text: &str) -> Result<Vec<Block>> {
         let ast = to_mdast(markdown_text, &ParseOptions::default())
-            .map_err(|e| LitError::Markdown(e.to_string()))?;
+            .map_err(|e| LitError::Markdown(e.to_string()))?; // cov-excl-line: to_mdast only fails on MDX, which default options disable
 
         let Node::Root(root) = ast else {
             return Err(LitError::NotRoot); // cov-excl-line: unreachable — to_mdast always returns Root
@@ -350,6 +350,29 @@ code
         let result = solve_block_order(&blocks);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Unknown block ID"));
+    }
+
+    #[test]
+    fn test_solve_unknown_before_block_id() {
+        let blocks = vec![create_constrained_block(
+            "a",
+            vec![Constraint::Before(vec![
+                BlockId::new("unknown".to_string()).unwrap(),
+            ])],
+            "A",
+        )];
+
+        let result = solve_block_order(&blocks);
+        assert!(result.unwrap_err().to_string().contains("Unknown block ID"));
+    }
+
+    #[test]
+    fn test_parse_invalid_after_and_before_ids() {
+        for param in ["after", "before"] {
+            let markdown = format!("```tangle:///a.txt?id=a&{param}=Bad\n```\n");
+            let err = Lit::parse_markdown(&markdown).unwrap_err();
+            assert!(err.to_string().contains("'Bad' is invalid"), "{err}");
+        }
     }
 
     #[test]
@@ -1731,7 +1754,7 @@ fn run_jq(
     let var_values = vars
         .iter()
         .map(|(_, value)| to_val(value.clone()))
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+        .collect::<std::result::Result<Vec<_>, _>>()?; // cov-excl-line: every serde_json::Value deserializes into a jaq Val
     let ctx = Ctx::<data::JustLut<Val>>::new(&filter.lut, Vars::new(var_values));
 
     let mut outputs = filter.id.run((ctx, to_val(input)?));

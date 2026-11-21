@@ -838,6 +838,25 @@ code
         assert!(result.unwrap_err().to_string().contains("Unknown block ID"));
     }
 
+    #[test]
+    fn test_solve_unknown_before_block_id() {
+        let blocks = vec![
+            create_constrained_block("a", vec![Constraint::Before(vec![BlockId::new("unknown".to_string()).unwrap()])], "A"),
+        ];
+
+        let result = solve_block_order(&blocks);
+        assert!(result.unwrap_err().to_string().contains("Unknown block ID"));
+    }
+
+    #[test]
+    fn test_parse_invalid_after_and_before_ids() {
+        for param in ["after", "before"] {
+            let markdown = format!("```tangle:///a.txt?id=a&{param}=Bad\n```\n");
+            let err = Lit::parse_markdown(&markdown).unwrap_err();
+            assert!(err.to_string().contains("'Bad' is invalid"), "{err}");
+        }
+    }
+
 ```
 
 ```tangle:///src/lib.rs?id=test-solve-first-last&inside=test-mod
