@@ -411,6 +411,20 @@ a: {b: 2}
     }
 
     #[test]
+    fn test_data_format_display() {
+        assert_eq!(DataFormat::Json.to_string(), "JSON");
+        assert_eq!(DataFormat::Toml.to_string(), "TOML");
+        assert_eq!(DataFormat::Yaml.to_string(), "YAML");
+    }
+
+    #[test]
+    fn test_tangled_file_render_surfaces_data_error() {
+        let blocks = Lit::parse_markdown("```tangle:///a.toml?as=json\n[1]\n```\n").unwrap();
+        let file = TangledFile::new(Utf8PathBuf::from("a.toml"), blocks);
+        assert!(matches!(file.render(), Err(LitError::Data(DataError::Render { .. }))));
+    }
+
+    #[test]
     fn test_data_yaml_renders_scalar_root() {
         assert_eq!(DataFormat::Yaml.render(&Value::Null).unwrap(), "null\n");
     }
